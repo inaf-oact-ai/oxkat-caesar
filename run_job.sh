@@ -158,6 +158,28 @@ if [ "$JOB_DIR" == "" ]; then
 fi
 
 ###############################
+##    SET ASTROPY DIRS
+###############################
+
+# - Set writable Astropy configuration and cache directories.
+#   Singularity/Slurm may run with --containall --no-home,
+#   leaving /home/caesar read-only.
+#
+#   Use the per-job execution directory to isolate cache/config
+#   files from other jobs.
+
+export XDG_CONFIG_HOME="$JOB_DIR/.config"
+export XDG_CACHE_HOME="$JOB_DIR/.cache"
+
+# - Create directories if not existing
+echo "INFO: Creating Astropy config/cache directories ..."
+mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+
+# - Print directory paths
+echo "INFO: XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
+echo "INFO: XDG_CACHE_HOME=$XDG_CACHE_HOME"
+
+###############################
 ##    RUN OXKAT JOB
 ###############################
 # - Parse job arguments into a Bash array.
