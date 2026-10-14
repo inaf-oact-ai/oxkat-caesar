@@ -1,0 +1,84 @@
+Bootstrap: localimage
+From: oxkat-0.41.sif
+
+%labels
+    Author CAESAR-REST
+    Description "CAESAR-REST oxkat GET_INFO container, based on oxkat 0.41"
+    Application oxkat-caesar
+
+# Build context must contain:
+#   oxkat-0.41.sif         original scientific image
+#   run_job.sh             oxkat-specific CAESAR-REST entrypoint
+#   run_oxkat.sh           tested GET_INFO scientific runner
+# Run singularity build FROM the directory containing these files.
+%files
+    run_job.sh /opt/caesar/run_job.sh
+    run_oxkat.sh /opt/caesar/run_oxkat.sh
+
+%post
+    set -eu
+
+    # Create the API execution account used by Kubernetes's root-runner mode.
+    # In Slurm, jobs should continue running as the host caesar account.
+    if ! getent group caesar >/dev/null 2>&1; then
+        groupadd caesar
+    fi
+    if ! id caesar >/dev/null 2>&1; then
+        useradd --create-home --gid caesar --shell /bin/bash caesar
+    fi
+
+    mkdir -p /opt/caesar /mnt/storage
+    chmod 0755 /opt/caesar/run_job.sh /opt/caesar/run_oxkat.sh
+
+    # Install build-time Git and Kubernetes RCLONE/FUSE dependencies if absent.
+    # The base image is Debian Bullseye. These packages are not updated later
+    # during scientific runs; /dev/fuse must be provided by the Kubernetes pod.
+    MISSING_PACKAGES=""
+    if ! command -v git >/dev/null 2>&1; then
+        MISSING_PACKAGES="$MISSING_PACKAGES git ca-certificates"
+    fi
+    if [ ! -x /usr/bin/rclone ]; then
+        MISSING_PACKAGES="$MISSING_PACKAGES rclone"
+    fi
+    if [ ! -x /bin/fusermount ] && [ ! -x /bin/fusermount3 ] && [ ! -x /usr/bin/fusermount3 ]; then
+        MISSING_PACKAGES="$MISSING_PACKAGES fuse"
+    fi
+    if [ -n "$MISSING_PACKAGES" ]; then
+        apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $MISSING_PACKAGES
+        rm -rf /var/lib/apt/lists/*
+    fi
+
+    # Fetch oxkat during the image build instead of requiring a host checkout.
+    # For reproducible builds, replace HEAD with a reviewed full commit SHA.
+    # HEAD deliberately tracks upstream until a revision is selected.
+    OXKAT_REPOSITORY="https://github.com/IanHeywood/oxkat.git"
+    OXKAT_REF="HEAD"
+    git clone "$OXKAT_REPOSITORY" /opt/oxkat
+    git -C /opt/oxkat checkout --detach "$OXKAT_REF"
+    git -C /opt/oxkat rev-parse HEAD > /opt/caesar/oxkat_commit.txt
+    echo "INFO: Packaged oxkat revision: $(cat /opt/caesar/oxkat_commit.txt)"
+
+    # Keep the upstream oxkat Python files read-only in the image.
+    # run_oxkat.sh copies oxkat/ to a job-specific writable workspace.
+    chmod -R a+rX /opt/oxkat
+
+%environment
+    export OXKAT_HOME=/opt/oxkat
+    export OXKAT_RUNNER_PATH=/opt/caesar/run_oxkat.sh
+    export PATH=/opt/caesar:$PATH
+
+%runscript
+    # Forward CAESAR-REST's existing CLI contract without evaluating arguments.
+    exec /opt/caesar/run_job.sh "$@"
+
+%test
+    # Image-level smoke tests; real MS processing must be run with bind mounts.
+    bash -n /opt/caesar/run_job.sh
+    bash -n /opt/caesar/run_oxkat.sh
+    test -s /opt/caesar/oxkat_commit.txt
+    test -f /opt/oxkat/oxkat/config.py
+    test -f /opt/oxkat/setups/0_GET_INFO.py
+    test -f /opt/oxkat/tools/ms_info.py
+    test -x /usr/bin/rclone
+    /usr/bin/python3 -c 'import numpy, astropy'
