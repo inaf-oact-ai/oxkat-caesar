@@ -161,21 +161,27 @@ fi
 ##    SET ASTROPY DIRS
 ###############################
 
-# - Set writable Astropy configuration and cache directories.
-#   Singularity/Slurm may run with --containall --no-home,
-#   leaving /home/caesar read-only.
-#
-#   Use the per-job execution directory to isolate cache/config
-#   files from other jobs.
+# - Use the writable per-job directory as HOME.
+#   Older Astropy versions may use ~/.astropy instead of XDG paths.
+#   Slurm runs with --containall --no-home, so /home/caesar
+#   inside the container may be read-only.
 
-export XDG_CONFIG_HOME="$JOB_DIR/.config"
-export XDG_CACHE_HOME="$JOB_DIR/.cache"
+export HOME="$JOB_DIR"
+
+# - Set XDG configuration and cache directories
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_CACHE_HOME="$HOME/.cache"
 
 # - Create directories if not existing
 echo "INFO: Creating Astropy config/cache directories ..."
-mkdir -p "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+mkdir -p \
+    "$HOME/.astropy/config" \
+    "$HOME/.astropy/cache" \
+    "$XDG_CONFIG_HOME" \
+    "$XDG_CACHE_HOME"
 
 # - Print directory paths
+echo "INFO: HOME=$HOME"
 echo "INFO: XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
 echo "INFO: XDG_CACHE_HOME=$XDG_CACHE_HOME"
 
@@ -233,13 +239,26 @@ if [ -n "$JOB_OUTDIR" ]; then
 fi
 OXKAT_CMD+=("${OXKAT_ARGS[@]}")
 
-printf 'INFO: Running oxkat command:'
-printf ' %q' "${OXKAT_CMD[@]}"
-printf '\n'
+
+# - Check Astropy cache dir
+echo "INFO: Checking Astropy directories ..."
+python3 -c '
+import os
+from astropy.config import get_config_dir, get_cache_dir
+
+print("HOME:", os.environ.get("HOME"))
+print("Astropy config:", get_config_dir())
+print("Astropy cache:", get_cache_dir())
+'
 
 # - Execute oxkat.
 #   Kubernetes may start this entrypoint as root and switch to RUNUSER.
 #   Slurm already runs as the submitting user (CHANGE_RUNUSER=0).
+
+printf 'INFO: Running oxkat command:'
+printf ' %q' "${OXKAT_CMD[@]}"
+printf '\n'
+
 if [ "$CHANGE_USER" = true ]; then
 	if [ "$(id -u)" -ne 0 ]; then
 		echo 'ERROR: --change-runuser=1 requires root; use 0 inside Slurm.' >&2
