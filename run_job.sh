@@ -241,15 +241,15 @@ OXKAT_CMD+=("${OXKAT_ARGS[@]}")
 
 
 # - Check Astropy cache dir
-echo "INFO: Checking Astropy directories ..."
-python3 -c '
-import os
-from astropy.config import get_config_dir, get_cache_dir
+#echo "INFO: Checking Astropy directories ..."
+#python3 -c '
+#import os
+#from astropy.config import get_config_dir, get_cache_dir
 
-print("HOME:", os.environ.get("HOME"))
-print("Astropy config:", get_config_dir())
-print("Astropy cache:", get_cache_dir())
-'
+#print("HOME:", os.environ.get("HOME"))
+#print("Astropy config:", get_config_dir())
+#print("Astropy cache:", get_cache_dir())
+#'
 
 # - Execute oxkat.
 #   Kubernetes may start this entrypoint as root and switch to RUNUSER.
