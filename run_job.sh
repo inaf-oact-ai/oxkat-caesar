@@ -3,13 +3,21 @@
 ##########################
 ##    PARSE ARGS
 ##########################
-RUNUSER="caesar"
-CHANGE_USER=true
+# - Read CAESAR-REST environment variables (Slurm convention).
+#   Command-line arguments below take precedence when explicitly supplied.
+RUNUSER="${RUNUSER:-caesar}"
+CHANGE_RUNUSER_FLAG="${CHANGE_RUNUSER:-1}"
+if [ "$CHANGE_RUNUSER_FLAG" = "0" ]; then
+	CHANGE_USER=false
+else
+	CHANGE_USER=true
+fi
 
 # - CAESAR OPTIONS
-JOB_DIR=""
-JOB_OUTDIR=""
-JOB_ARGS=""
+#   JOB_DIR is the per-job execution directory (not a fixed /workspace path).
+JOB_DIR="${JOB_DIR:-}"
+JOB_OUTDIR="${JOB_OUTDIR:-}"
+JOB_ARGS="${JOB_OPTIONS:-}"
 ##INPUTFILE=""
 
 # - RCLONE OPTIONS
@@ -26,65 +34,67 @@ for item in "$@"
 do
 	case $item in
 		--runuser=*)
-    	RUNUSER="${item#*=}"
-    ;;
+			RUNUSER="${item#*=}"
+		;;
 		--change-runuser=*)
-    	CHANGE_USER_FLAG="${item#*=}"
+			CHANGE_USER_FLAG="${item#*=}"
 			if [ "$CHANGE_USER_FLAG" = "1" ] ; then
 				CHANGE_USER=true
 			else
 				CHANGE_USER=false
 			fi
-    ;;
+		;;
 		--jobdir=*)
-    	JOB_DIR="${item#*=}"
-    ;;
+			JOB_DIR="${item#*=}"
+		;;
 		--joboutdir=*)
-    	JOB_OUTDIR="${item#*=}"
-    ;;
+			JOB_OUTDIR="${item#*=}"
+		;;
 		--jobargs=*)
-    	JOB_ARGS="${item#*=}"
-    ;;
+			JOB_ARGS="${item#*=}"
+		;;
 ##		--inputfile=*)
 ##    	INPUTFILE=`echo $item | /bin/sed 's/[-a-zA-Z0-9]*=//'`
-##    ;;
+##		;;
 		--mount-rclone-volume=*)
-    	MOUNT_RCLONE_VOLUME="${item#*=}"
-    ;;
+			MOUNT_RCLONE_VOLUME="${item#*=}"
+		;;
 		--mount-volume-path=*)
-    	MOUNT_VOLUME_PATH="${item#*=}"
-    ;;
+			MOUNT_VOLUME_PATH="${item#*=}"
+		;;
 		--rclone-remote-storage=*)
-    	RCLONE_REMOTE_STORAGE="${item#*=}"
-    ;;
+			RCLONE_REMOTE_STORAGE="${item#*=}"
+		;;
 		--rclone-remote-storage-path=*)
-    	RCLONE_REMOTE_STORAGE_PATH="${item#*=}"
-    ;;
+			RCLONE_REMOTE_STORAGE_PATH="${item#*=}"
+		;;
 		--rclone-mount-wait=*)
-    	RCLONE_MOUNT_WAIT_TIME="${item#*=}"
-    ;;
+			RCLONE_MOUNT_WAIT_TIME="${item#*=}"
+		;;
 		--rclone-copy-wait=*)
-    	RCLONE_COPY_WAIT_TIME="${item#*=}"
-    ;;
+			RCLONE_COPY_WAIT_TIME="${item#*=}"
+		;;
 
-	*)
-    # Unknown option
-    echo "ERROR: Unknown option ($item)...exit!"
-    exit 1
-    ;;
+		*)
+			# - Unknown option
+			echo "ERROR: Unknown option ($item)...exit!"
+			exit 1
+		;;
 	esac
 done
 
 
 # - Check options
+#   JOB_OPTIONS is supplied by CAESAR-REST through Singularity --env.
+#   Manual invocations may override it with --jobargs.
 if [ "$JOB_ARGS" = "" ]; then
 	echo "ERROR: Empty JOB_ARGS argument!"
 	exit 1
 fi
 
 if ! [[ "$RCLONE_COPY_WAIT_TIME" =~ ^[0-9]+$ ]]; then
-    echo "ERROR: Invalid RCLONE_COPY_WAIT_TIME" >&2
-    exit 2
+	echo "ERROR: Invalid RCLONE_COPY_WAIT_TIME" >&2
+	exit 2
 fi
 
 ###############################
@@ -150,42 +160,54 @@ fi
 ###############################
 ##    RUN OXKAT JOB
 ###############################
-# --jobargs is a whitespace-delimited list of --option=value arguments.
-# It is deliberately NOT evaluated as shell code. Paths with spaces are
-# currently unsupported in this API contract.
+# - Parse job arguments into a Bash array.
+#   JOB_OPTIONS / --jobargs is a whitespace-delimited list of --option=value
+#   arguments. Do not evaluate it as shell code. Paths with spaces are not
+#   supported by the current CAESAR-REST job argument contract.
 read -r -a OXKAT_ARGS <<< "$JOB_ARGS"
+
+# - Check the supported scientific options
 HAS_STAGE=false
 HAS_MS=false
 for arg in "${OXKAT_ARGS[@]}"; do
-    case "$arg" in
-        --stage=GET_INFO) HAS_STAGE=true ;;
-        --input-ms=/*) HAS_MS=true ;;
-        --oxkat-home=/*) ;;
-        *) echo "ERROR: Unsupported oxkat argument: $arg" >&2; exit 2 ;;
-    esac
+	case "$arg" in
+		--stage=GET_INFO)
+			HAS_STAGE=true
+		;;
+		--input-ms=/*)
+			HAS_MS=true
+		;;
+		--oxkat-home=/*)
+			# - Optional override of the oxkat source directory
+		;;
+		*)
+			echo "ERROR: Unsupported oxkat argument: $arg" >&2
+			exit 2
+		;;
+	esac
 done
+
 if [ "$HAS_STAGE" != true ] || [ "$HAS_MS" != true ]; then
-    echo 'ERROR: oxkat requires --stage=GET_INFO and --input-ms=/absolute/path.ms' >&2
-    exit 2
+	echo 'ERROR: oxkat requires --stage=GET_INFO and --input-ms=/absolute/path.ms' >&2
+	exit 2
 fi
 
-# Match the existing CAESAR runner calling convention. In Kubernetes
-# --mount-rclone-volume=1 mounts storage above; in Slurm this option is 0.; 
-# the caller must provide a writable --joboutdir on the desired filesystem.
+# - Select the oxkat runner included in the container
 OXKAT_EXE="${OXKAT_RUNNER_PATH:-/opt/caesar/run_oxkat.sh}"
 if [ ! -f "$OXKAT_EXE" ]; then
-    echo "ERROR: Missing oxkat runner at $OXKAT_EXE" >&2
-    exit 1
+	echo "ERROR: Missing oxkat runner at $OXKAT_EXE" >&2
+	exit 1
 fi
 
-# Use a Bash array rather than eval to preserve argument boundaries and
-# avoid interpreting shell metacharacters from the CAESAR-REST request.
+# - Set runner arguments.
+#   JOB_DIR is the execution directory; JOB_OUTDIR contains collected outputs.
+#   --waitcopy retains the previous RCLONE VFS cache delay for Kubernetes.
 OXKAT_CMD=(bash "$OXKAT_EXE" --run "--jobdir=$JOB_DIR")
 if [ -n "$JOB_OUTDIR" ]; then
-    OXKAT_CMD+=("--outdir=$JOB_OUTDIR")
-    if [ "$MOUNT_RCLONE_VOLUME" = "1" ]; then
-        OXKAT_CMD+=(--waitcopy "--copywaittime=$RCLONE_COPY_WAIT_TIME")
-    fi
+	OXKAT_CMD+=("--outdir=$JOB_OUTDIR")
+	if [ "$MOUNT_RCLONE_VOLUME" = "1" ]; then
+		OXKAT_CMD+=(--waitcopy "--copywaittime=$RCLONE_COPY_WAIT_TIME")
+	fi
 fi
 OXKAT_CMD+=("${OXKAT_ARGS[@]}")
 
@@ -193,14 +215,15 @@ printf 'INFO: Running oxkat command:'
 printf ' %q' "${OXKAT_CMD[@]}"
 printf '\n'
 
-# Kubernetes can run this entrypoint as root and switch to the caesar
-# account. Slurm already runs under caesar: pass --change-runuser=0.
+# - Execute oxkat.
+#   Kubernetes may start this entrypoint as root and switch to RUNUSER.
+#   Slurm already runs as the submitting user (CHANGE_RUNUSER=0).
 if [ "$CHANGE_USER" = true ]; then
-    if [ "$(id -u)" -ne 0 ]; then
-        echo 'ERROR: --change-runuser=1 requires root; use 0 inside Slurm.' >&2
-        exit 1
-    fi
-    exec runuser -u "$RUNUSER" -- "${OXKAT_CMD[@]}"
+	if [ "$(id -u)" -ne 0 ]; then
+		echo 'ERROR: --change-runuser=1 requires root; use 0 inside Slurm.' >&2
+		exit 1
+	fi
+	exec runuser -u "$RUNUSER" -- "${OXKAT_CMD[@]}"
 else
-    exec "${OXKAT_CMD[@]}"
+	exec "${OXKAT_CMD[@]}"
 fi
