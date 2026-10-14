@@ -206,34 +206,45 @@ assert config.__file__.startswith(config.CWD + '/oxkat/')
 PY
 
 # -----------------------------------------------------------------------------
-# Serialize a compact, machine-readable CAESAR-REST result manifest
+# Serialize a public, portable CAESAR-REST result manifest
 # -----------------------------------------------------------------------------
-# Store paths/references rather than copying large Measurement Sets or logs.
-# The outdir is distinct from the oxkat workspace when supplied.
-# Status is either prepared, completed or failed; exit_code is preserved.
+# Expose only files delivered in OUT_DIR, using paths relative to that directory.
+# Never publish host/container absolute paths, usernames, or mount locations.
+# Diagnostics can still be inspected in the private job workspace when needed.
 write_manifest() {
     local status="$1"
     local code="$2"
-  STATUS="$status" EXIT_CODE="$code" OUT_DIR="$OUT_DIR" JOB_DIR="$JOB_DIR" INPUT_MS="$INPUT_MS" \
-  /usr/bin/python3 - <<'PY'
+
+    STATUS="$status" EXIT_CODE="$code" OUT_DIR="$OUT_DIR" INPUT_MS="$INPUT_MS" \
+    /usr/bin/python3 - <<'PYMANIFEST'
 import json
 import os
-import pathlib
-out = pathlib.Path(os.environ['OUT_DIR'])
-job = pathlib.Path(os.environ['JOB_DIR'])
-info = job / 'project_info.json'
-data = {
+from pathlib import Path
+
+out = Path(os.environ['OUT_DIR'])
+
+def artifact(name):
+    """Return a relative filename only if present in the output directory."""
+    path = out / name
+    return name if path.is_file() else None
+
+# Only list copied logs. Avoid exposing paths in the execution workspace.
+logs = sorted(path.name for path in out.glob('*.log') if path.is_file())
+
+manifest = {
     'stage': 'GET_INFO',
     'status': os.environ['STATUS'],
     'exit_code': int(os.environ['EXIT_CODE']),
-    'input_ms': os.environ['INPUT_MS'],
-    'job_dir': str(job),
-    'project_info': str(info) if info.is_file() else None,
-    'logs_dir': str(job / 'LOGS'),
-    'generated_script': str(job / 'submit_info_job.sh') if (job / 'submit_info_job.sh').is_file() else None,
+    'input_ms_name': Path(os.environ['INPUT_MS']).name,
+    'artifacts': {
+        'project_info': artifact('project_info.json'),
+        'execution_script': artifact('submit_info_job.sh'),
+        'logs': logs,
+    },
 }
-(out / 'oxkat_manifest.json').write_text(json.dumps(data, indent=2) + '\n')
-PY
+
+(out / 'oxkat_manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+PYMANIFEST
 }
 
 
