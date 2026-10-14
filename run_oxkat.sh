@@ -26,8 +26,8 @@ Options:
   --outdir=DIR          Directory for compact result manifest and diagnostic files.
   --oxkat-home=DIR      Location of cloned oxkat repo (default: /opt/oxkat).
   --run                 Execute the generated script (otherwise prepare only).
-  --waitcopy            Accepted for compatibility with CAESAR-REST run_job.sh.
-  --copywaittime=N      Accepted for compatibility (no artificial sleep).
+  --waitcopy            Wait after copying output products (default: disabled).
+  --copywaittime=N      Delay in seconds after copying (default: 30).
 USAGE
 }
 
@@ -37,20 +37,53 @@ USAGE
 # Use a case statement rather than evaluating caller-provided argument text.
 # The cloned oxkat source is expected at /opt/oxkat in the final image,
 # but can be supplied from a bind-mounted directory during development.
-STAGE=""; JOB_DIR=""; INPUT_MS=""; OUT_DIR=""; OXKAT_HOME="${OXKAT_HOME:-/opt/oxkat}"; RUN=false
+STAGE=""
+JOB_DIR=""
+INPUT_MS=""
+OUT_DIR=""
+OXKAT_HOME="${OXKAT_HOME:-/opt/oxkat}"
+RUN=false
+
+# - Output-copy synchronization options.
+WAIT_COPY=false
+COPY_WAIT_TIME=30
+
 for arg in "$@"; do
-  case "$arg" in
-    --stage=*) STAGE="${arg#*=}" ;;
-    --jobdir=*) JOB_DIR="${arg#*=}" ;;
-    --input-ms=*) INPUT_MS="${arg#*=}" ;;
-    --outdir=*) OUT_DIR="${arg#*=}" ;;
-    --oxkat-home=*) OXKAT_HOME="${arg#*=}" ;;
-    --run) RUN=true ;;
-    --waitcopy) : ;;
-    --copywaittime=*) : ;;
-    --help|-h) usage; exit 0 ;;
-    *) printf 'ERROR: Unsupported option: %s\n' "$arg" >&2; usage >&2; exit 2 ;;
-  esac
+    case "$arg" in
+        --stage=*)
+            STAGE="${arg#*=}"
+            ;;
+        --jobdir=*)
+            JOB_DIR="${arg#*=}"
+            ;;
+        --input-ms=*)
+            INPUT_MS="${arg#*=}"
+            ;;
+        --outdir=*)
+            OUT_DIR="${arg#*=}"
+            ;;
+        --oxkat-home=*)
+            OXKAT_HOME="${arg#*=}"
+            ;;
+        --run)
+            RUN=true
+            ;;
+        --waitcopy)
+            WAIT_COPY=true
+            ;;
+        --copywaittime=*)
+            COPY_WAIT_TIME="${arg#*=}"
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'ERROR: Unsupported option: %s\n' "$arg" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
 done
 
 # -----------------------------------------------------------------------------
@@ -58,12 +91,32 @@ done
 # -----------------------------------------------------------------------------
 # Deliberately reject unsupported stages; new stages require their own
 # validation, expected outputs and scientific parameters before enabling.
-[[ "$STAGE" == "GET_INFO" ]] || { echo 'ERROR: Only GET_INFO is supported in v0.' >&2; exit 2; }
-[[ -n "$JOB_DIR" && -n "$INPUT_MS" ]] || { usage >&2; exit 2; }
-[[ -d "$INPUT_MS" && "$INPUT_MS" == *.ms ]] || { echo 'ERROR: --input-ms must point to an existing *.ms directory.' >&2; exit 2; }
+if [[ "$STAGE" != "GET_INFO" ]]; then
+    echo 'ERROR: Only GET_INFO is supported in v0.' >&2
+    exit 2
+fi
+
+if [[ -z "$JOB_DIR" || -z "$INPUT_MS" ]]; then
+    usage >&2
+    exit 2
+fi
+
+if [[ ! -d "$INPUT_MS" || "$INPUT_MS" != *.ms ]]; then
+    echo 'ERROR: --input-ms must point to an existing *.ms directory.' >&2
+    exit 2
+fi
+
 for required in oxkat/config.py setups/0_GET_INFO.py tools/ms_info.py data; do
-  [[ -e "$OXKAT_HOME/$required" ]] || { echo "ERROR: Missing $OXKAT_HOME/$required" >&2; exit 2; }
+    if [[ ! -e "$OXKAT_HOME/$required" ]]; then
+        echo "ERROR: Missing $OXKAT_HOME/$required" >&2
+        exit 2
+    fi
 done
+
+if ! [[ "$COPY_WAIT_TIME" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: --copywaittime must be a non-negative integer" >&2
+    exit 2
+fi
 
 # -----------------------------------------------------------------------------
 # Normalize paths and protect existing workspaces
@@ -75,13 +128,31 @@ INPUT_MS="$(cd "$INPUT_MS" && pwd -P)"
 OXKAT_HOME="$(cd "$OXKAT_HOME" && pwd -P)"
 mkdir -p "$JOB_DIR"
 JOB_DIR="$(cd "$JOB_DIR" && pwd -P)"
-[[ -n "$OUT_DIR" ]] || OUT_DIR="$JOB_DIR/caesar-results"
+if [[ -z "$OUT_DIR" ]]; then
+    OUT_DIR="$JOB_DIR/caesar-results"
+fi
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"
-[[ "$INPUT_MS" != "$JOB_DIR"* ]] || { echo 'ERROR: Input MS must be outside job workspace.' >&2; exit 2; }
-[[ ! -e "$JOB_DIR/.oxkat-run-started" ]] || { echo 'ERROR: Job directory already used; specify a fresh --jobdir.' >&2; exit 2; }
-[[ ! -e "$JOB_DIR/project_info.json" ]] || { echo 'ERROR: Existing project_info.json; use a fresh workspace.' >&2; exit 2; }
-[[ ! -e "$JOB_DIR/oxkat" && ! -L "$JOB_DIR/oxkat" ]] || { echo 'ERROR: Workspace already contains oxkat/.' >&2; exit 2; }
+
+if [[ "$INPUT_MS" == "$JOB_DIR" || "$INPUT_MS" == "$JOB_DIR/"* ]]; then
+    echo 'ERROR: Input MS must be outside job workspace.' >&2
+    exit 2
+fi
+
+if [[ -e "$JOB_DIR/.oxkat-run-started" ]]; then
+    echo 'ERROR: Job directory already used; specify a fresh --jobdir.' >&2
+    exit 2
+fi
+
+if [[ -e "$JOB_DIR/project_info.json" ]]; then
+    echo 'ERROR: Existing project_info.json; use a fresh workspace.' >&2
+    exit 2
+fi
+
+if [[ -e "$JOB_DIR/oxkat" || -L "$JOB_DIR/oxkat" ]]; then
+    echo 'ERROR: Workspace already contains oxkat/.' >&2
+    exit 2
+fi
 
 # -----------------------------------------------------------------------------
 # Assemble the oxkat workspace
@@ -108,8 +179,11 @@ mkdir -p "$JOB_DIR"/{LOGS,SCRIPTS,GAINTABLES,GAINPLOTS,IMAGES,VISPLOTS}
 # invoke them directly rather than trying to start another Singularity image.
 # Change exactly one assignment; fail if upstream config.py has changed.
 /usr/bin/python3 - "$JOB_DIR/oxkat/config.py" <<'PY'
-import pathlib, re, sys
-p = pathlib.Path(sys.argv[1]); content = p.read_text()
+import pathlib
+import re
+import sys
+p = pathlib.Path(sys.argv[1])
+content = p.read_text()
 content, n = re.subn(r'(?m)^USE_SINGULARITY\s*=\s*True\s*$', 'USE_SINGULARITY = False', content)
 if n != 1:
     raise SystemExit('Expected exactly one USE_SINGULARITY = True assignment')
@@ -138,15 +212,19 @@ PY
 # The outdir is distinct from the oxkat workspace when supplied.
 # Status is either prepared, completed or failed; exit_code is preserved.
 write_manifest() {
-  local status="$1" code="$2"
+    local status="$1"
+    local code="$2"
   STATUS="$status" EXIT_CODE="$code" OUT_DIR="$OUT_DIR" JOB_DIR="$JOB_DIR" INPUT_MS="$INPUT_MS" \
   /usr/bin/python3 - <<'PY'
-import json, os, pathlib
+import json
+import os
+import pathlib
 out = pathlib.Path(os.environ['OUT_DIR'])
 job = pathlib.Path(os.environ['JOB_DIR'])
 info = job / 'project_info.json'
 data = {
-    'stage': 'GET_INFO', 'status': os.environ['STATUS'],
+    'stage': 'GET_INFO',
+    'status': os.environ['STATUS'],
     'exit_code': int(os.environ['EXIT_CODE']),
     'input_ms': os.environ['INPUT_MS'],
     'job_dir': str(job),
@@ -158,6 +236,52 @@ data = {
 PY
 }
 
+
+copy_outputs() {
+    # The primary scientific result is already copied by the runner.
+    # Copy additional diagnostic artifacts only when source and
+    # destination are different.
+
+    if [[ "$JOB_DIR" == "$OUT_DIR" ]]; then
+        return 0
+    fi
+
+    echo "INFO: Collecting oxkat diagnostic outputs..."
+
+    if [[ -f "$JOB_DIR/submit_info_job.sh" ]]; then
+        cp -f "$JOB_DIR/submit_info_job.sh" "$OUT_DIR/"
+    fi
+
+    for logfile in "$JOB_DIR"/*.log "$JOB_DIR"/LOGS/*.log; do
+        if [[ ! -f "$logfile" ]]; then
+            continue
+        fi
+        cp -f "$logfile" "$OUT_DIR/"
+    done
+}
+
+on_error() {
+    local code=$?
+
+    trap - ERR
+
+    # Record the scientific or execution failure.
+    write_manifest failed "$code" || true
+
+    # Preserve diagnostic files even when scientific processing fails.
+    copy_outputs || true
+
+    # Give RCLONE additional time to transfer failed-job diagnostics.
+    if [[ "$WAIT_COPY" == true ]]; then
+        echo "INFO: Waiting $COPY_WAIT_TIME seconds after failure..."
+        sleep "$COPY_WAIT_TIME"
+    fi
+
+    exit "$code"
+}
+
+
+
 # -----------------------------------------------------------------------------
 # Mark execution and install error reporting
 # -----------------------------------------------------------------------------
@@ -165,7 +289,7 @@ PY
 # On an ERR trap, record failure in the manifest without masking the original
 # exit status. Earlier validation errors happen before the trap is installed.
 touch "$JOB_DIR/.oxkat-run-started"
-trap 'code=$?; trap - ERR; write_manifest failed "$code" || true; exit "$code"' ERR
+trap on_error ERR
 
 # -----------------------------------------------------------------------------
 # Generate oxkat's GET_INFO local execution script
@@ -174,7 +298,11 @@ trap 'code=$?; trap - ERR; write_manifest failed "$code" || true; exit "$code"' 
 # commands executed sequentially (and commonly piped through tee).
 # pipefail ensures generation errors are not hidden by our tee process.
 /usr/bin/python3 "$JOB_DIR/setups/0_GET_INFO.py" node 2>&1 | tee "$JOB_DIR/LOGS/caesar_setup_GET_INFO.log"
-[[ -f "$JOB_DIR/submit_info_job.sh" ]] || { echo 'ERROR: oxkat did not generate submit_info_job.sh' >&2; exit 1; }
+
+if [[ ! -f "$JOB_DIR/submit_info_job.sh" ]]; then
+    echo 'ERROR: oxkat did not generate submit_info_job.sh' >&2
+    false  # Invoke ERR trap for a missing generated script.
+fi
 
 # -----------------------------------------------------------------------------
 # Optionally execute GET_INFO and validate its primary output
@@ -184,24 +312,51 @@ trap 'code=$?; trap - ERR; write_manifest failed "$code" || true; exit "$code"' 
 # failures from oxkat-generated "command | tee logfile" pipelines.
 # In execution mode, require nonempty, parseable project_info.json with band.
 if [[ "$RUN" == true ]]; then
-  bash -o errexit -o pipefail "$JOB_DIR/submit_info_job.sh" 2>&1 | tee "$JOB_DIR/LOGS/caesar_run_GET_INFO.log"
-  [[ -s "$JOB_DIR/project_info.json" ]] || { echo 'ERROR: project_info.json missing or empty.' >&2; exit 1; }
-  /usr/bin/python3 - "$JOB_DIR/project_info.json" <<'PY'
-import json, sys
+    bash -o errexit -o pipefail "$JOB_DIR/submit_info_job.sh" 2>&1 \
+        | tee "$JOB_DIR/LOGS/caesar_run_GET_INFO.log"
+
+    if [[ ! -s "$JOB_DIR/project_info.json" ]]; then
+        echo 'ERROR: project_info.json missing or empty.' >&2
+        false  # Invoke ERR trap for a missing scientific result.
+    fi
+
+    /usr/bin/python3 - "$JOB_DIR/project_info.json" <<'PY'
+import json
+import sys
+
 with open(sys.argv[1]) as stream:
     obj = json.load(stream)
+
 if not isinstance(obj, dict) or not obj.get('band'):
     raise SystemExit('ERROR: Invalid project_info.json or missing band')
 PY
-  cp "$JOB_DIR/project_info.json" "$OUT_DIR/project_info.json"
-  STATUS=completed
+
+    # Avoid copying a file onto itself when OUT_DIR is the workspace.
+    if [[ "$OUT_DIR" != "$JOB_DIR" ]]; then
+        cp "$JOB_DIR/project_info.json" "$OUT_DIR/project_info.json"
+    fi
+
+    STATUS=completed
 else
-  STATUS=prepared
+    STATUS=prepared
 fi
 
 # -----------------------------------------------------------------------------
 # Report successful preparation/execution to CAESAR-REST
 # -----------------------------------------------------------------------------
+# Collect diagnostic artifacts first.
+copy_outputs
+
 # The manifest is the stable contract for eventual pipeline graph integration.
+# Write the final execution manifest.
 write_manifest "$STATUS" 0
-printf 'oxkat GET_INFO %s: manifest at %s/oxkat_manifest.json\n' "$STATUS" "$OUT_DIR"
+
+# Allow RCLONE time to flush its local VFS cache.
+# This is required only when explicitly requested.
+if [[ "$WAIT_COPY" == true ]]; then
+    echo "INFO: Waiting $COPY_WAIT_TIME seconds after output copying..."
+    sleep "$COPY_WAIT_TIME"
+fi
+
+printf 'oxkat GET_INFO %s: manifest at %s/oxkat_manifest.json\n' \
+    "$STATUS" "$OUT_DIR"
