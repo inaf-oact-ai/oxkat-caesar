@@ -101,8 +101,15 @@ if [[ -z "$JOB_DIR" || -z "$INPUT_MS" ]]; then
     exit 2
 fi
 
-if [[ ! -d "$INPUT_MS" || "$INPUT_MS" != *.ms ]]; then
-    echo 'ERROR: --input-ms must point to an existing *.ms directory.' >&2
+if [[ ! -d "$INPUT_MS" ]]; then
+    echo 'ERROR: --input-ms must point to an existing Measurement Set directory.' >&2
+    exit 2
+fi
+
+# - V1 supplies the original *.ms directory.
+# - V2 supplies the authorized read-only reference named measurement_set.
+if [[ "$INPUT_MS" != *.ms && "$(basename "$INPUT_MS")" != "measurement_set" ]]; then
+    echo 'ERROR: --input-ms must be a *.ms directory or the V2 measurement_set input.' >&2
     exit 2
 fi
 
@@ -169,7 +176,18 @@ cp -a "$OXKAT_HOME/oxkat" "$JOB_DIR/oxkat"
 ln -s "$OXKAT_HOME/setups" "$JOB_DIR/setups"
 ln -s "$OXKAT_HOME/tools" "$JOB_DIR/tools"
 ln -s "$OXKAT_HOME/data" "$JOB_DIR/data"
-ln -s "$INPUT_MS" "$JOB_DIR/$(basename "$INPUT_MS")"
+
+# - Preserve the original Measurement Set name for V1.
+# - Give the generic V2 input a conventional *.ms name so oxkat's
+#   existing setup scripts can discover it without modification.
+MS_NAME="$(basename "$INPUT_MS")"
+
+if [[ "$MS_NAME" == "measurement_set" ]]; then
+    MS_NAME="measurement_set.ms"
+fi
+
+ln -s "$INPUT_MS" "$JOB_DIR/$MS_NAME"
+
 mkdir -p "$JOB_DIR"/{LOGS,SCRIPTS,GAINTABLES,GAINPLOTS,IMAGES,VISPLOTS}
 
 # -----------------------------------------------------------------------------

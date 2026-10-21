@@ -216,7 +216,7 @@ for arg in "${OXKAT_ARGS[@]}"; do
 done
 
 if [ "$HAS_STAGE" != true ] || [ "$HAS_MS" != true ]; then
-	echo 'ERROR: oxkat requires --stage=GET_INFO and --input-ms=/absolute/path.ms' >&2
+	echo 'ERROR: oxkat requires --stage=GET_INFO and --input-ms=/absolute/directory' >&2
 	exit 2
 fi
 
