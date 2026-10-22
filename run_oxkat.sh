@@ -2,7 +2,9 @@
 # CAESAR-REST adapter for OXKAT.
 # Supported stages:
 #   GET_INFO: execute observation metadata extraction.
-#   1GC: prepare and validate the calibration recipe (no execution yet).
+#   1GC: generate and optionally execute first-generation calibration.
+#        The original Measurement Set remains read-only; calibration
+#        operates on private derived Measurement Sets.
 #
 # Intended invocation: run_job.sh -> run_oxkat.sh -> oxkat generated job script.
 # The input Measurement Set remains in its original storage location; this
@@ -25,7 +27,7 @@ Options:
   --stage=GET_INFO|1GC			First supported oxkat stage (future stages deliberately rejected).
   --jobdir=DIR							Private, writable, per-run workspace.
   --input-ms=PATH						Existing Measurement Set directory visible inside container.
-	--project-info=PATH       Path to the project_info.json artifact produced by the upstream GET_INFO stage. Required for 1GC; supplies observation metadata and calibration configuration.
+	--project-info=PATH				Path to the project_info.json artifact produced by the upstream GET_INFO stage. Required for 1GC; supplies observation metadata and calibration configuration.
   --outdir=DIR							Directory for compact result manifest and diagnostic files.
   --oxkat-home=DIR					Location of cloned oxkat repo (default: /opt/oxkat).
   --run											Execute the generated script (otherwise prepare only).
@@ -164,6 +166,12 @@ if [[ -z "$OUT_DIR" ]]; then
 fi
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"
+
+if [[ "$STAGE" == "1GC" && "$RUN" == true && "$OUT_DIR" == "$JOB_DIR" ]]; then
+	echo 'ERROR: 1GC execution requires a separate output directory.' >&2
+	exit 2
+fi
+
 
 if [[ "$INPUT_MS" == "$JOB_DIR" || "$INPUT_MS" == "$JOB_DIR/"* ]]; then
 	echo 'ERROR: Input MS must be outside job workspace.' >&2
@@ -356,27 +364,116 @@ copy_outputs() {
 	done
 }
 
+# -----------------------------------------------------------------------------
+# Validate and publish the 1GC scientific products
+# -----------------------------------------------------------------------------
+publish_1gc_products() {
+
+	local working_ms
+	local ms_path
+	local name
+
+	# Read the expected working MS name from trusted GET_INFO metadata.
+	working_ms=$(/usr/bin/python3 - "$JOB_DIR/project_info.json" <<'PY'
+import json
+import pathlib
+import sys
+
+with open(sys.argv[1]) as stream:
+	info = json.load(stream)
+
+name = info.get('working_ms')
+
+if (
+	not isinstance(name, str)
+	or pathlib.PurePosixPath(name).name != name
+	or not name.endswith('.ms')
+	or name in ('.', '..')
+):
+	raise SystemExit('Invalid working_ms in project_info.json')
+
+print(name)
+PY
+	)
+
+	if [[ ! -d "$JOB_DIR/$working_ms" || -L "$JOB_DIR/$working_ms" ]]; then
+		echo "ERROR: Missing private working MS: $working_ms" >&2
+		return 1
+	fi
+
+	if [[ "$working_ms" == "$MS_NAME" ]]; then
+		echo 'ERROR: Working MS must differ from the original MS' >&2
+		return 1
+	fi
+
+	# Gain tables must have been produced by reference calibration.
+	if ! compgen -G "$JOB_DIR/GAINTABLES/cal_1GC_*" > /dev/null; then
+		echo 'ERROR: No 1GC gain tables were produced' >&2
+		return 1
+	fi
+
+	# Publish only derived MS directories.
+	# Never follow or move the original read-only MS symlink.
+	for ms_path in "$JOB_DIR"/*.ms; do
+		[[ -e "$ms_path" ]] || continue
+
+		if [[ -L "$ms_path" ]]; then
+			if [[ "$ms_path" != "$JOB_DIR/$MS_NAME" ]]; then
+				echo "ERROR: Unexpected MS symlink: $ms_path" >&2
+				return 1
+			fi
+			continue
+		fi
+
+		[[ -d "$ms_path" ]] || {
+			echo "ERROR: Invalid MS product: $ms_path" >&2
+			return 1
+		}
+
+		name="$(basename "$ms_path")"
+
+		if [[ -e "$OUT_DIR/$name" ]]; then
+			echo "ERROR: Output already exists: $name" >&2
+			return 1
+		fi
+
+		mv -- "$ms_path" "$OUT_DIR/$name"
+	done
+
+	# Publish ancillary flag versions when CASA creates them.
+	for ms_path in "$JOB_DIR"/*.ms.flagversions; do
+		[[ -e "$ms_path" ]] || continue
+		[[ -d "$ms_path" && ! -L "$ms_path" ]] || return 1
+		mv -- "$ms_path" "$OUT_DIR/"
+	done
+
+	for name in GAINTABLES GAINPLOTS VISPLOTS; do
+		if [[ -d "$JOB_DIR/$name" && ! -L "$JOB_DIR/$name" ]]; then
+			mv -- "$JOB_DIR/$name" "$OUT_DIR/"
+		fi
+	done
+
+	echo 'INFO: OXKAT 1GC scientific products published.'
+}
+
+
 on_error() {
 	local code=$?
 
 	trap - ERR
 
-	# Record the scientific or execution failure.
-	write_manifest failed "$code" || true
-
-	# Preserve diagnostic files even when scientific processing fails.
+	# Preserve scientific diagnostics first.
 	copy_outputs || true
 
-	# Give RCLONE additional time to transfer failed-job diagnostics.
+	# Report the original failure without masking its exit code.
+	write_manifest failed "$code" || true
+
 	if [[ "$WAIT_COPY" == true ]]; then
-		echo "INFO: Waiting $COPY_WAIT_TIME seconds after failure..."
 		sleep "$COPY_WAIT_TIME"
 	fi
 
 	exit "$code"
 }
-
-
 
 # -----------------------------------------------------------------------------
 # Mark execution and install error reporting
@@ -388,10 +485,8 @@ touch "$JOB_DIR/.oxkat-run-started"
 trap on_error ERR
 
 # -----------------------------------------------------------------------------
-# Prepare the 1GC stage without executing calibration
+# Generate and optionally execute first-generation calibration
 # -----------------------------------------------------------------------------
-# The CAESAR-REST entrypoint always passes --run.
-# For this integration milestone, 1GC must only generate its execution recipe.
 if [[ "$STAGE" == "1GC" ]]; then
 
 	echo "INFO: Preparing OXKAT 1GC stage..."
@@ -399,27 +494,45 @@ if [[ "$STAGE" == "1GC" ]]; then
 	/usr/bin/python3 "$JOB_DIR/setups/1GC.py" node 2>&1 | tee "$JOB_DIR/LOGS/caesar_setup_1GC.log"
 
 	if [[ ! -s "$JOB_DIR/submit_1GC_jobs.sh" ]]; then
-		echo "ERROR: OXKAT did not generate submit_1GC_jobs.sh" >&2
+		echo 'ERROR: OXKAT did not generate submit_1GC_jobs.sh' >&2
 		false
 	fi
 
-	# Preserve upstream GET_INFO metadata as a registered output.
+	if [[ "$RUN" == true ]]; then
+
+		echo "INFO: Executing OXKAT 1GC calibration..."
+
+		# Propagate failures from CASA and Python commands piped through tee.
+		bash -o errexit -o pipefail \
+			"$JOB_DIR/submit_1GC_jobs.sh" 2>&1 \
+			| tee "$JOB_DIR/LOGS/caesar_run_1GC.log"
+
+		# Validate and publish scientific products.
+		publish_1gc_products
+
+		STATUS=completed
+
+	else
+
+		echo 'INFO: OXKAT 1GC preparation only.'
+		STATUS=prepared
+
+	fi
+
+	# Preserve the upstream observation metadata.
 	if [[ "$OUT_DIR" != "$JOB_DIR" ]]; then
 		cp "$JOB_DIR/project_info.json" "$OUT_DIR/project_info.json"
 	fi
 
-	# Copy generated script and diagnostic logs.
 	copy_outputs
-
-	# Record preparation, not scientific completion.
-	write_manifest prepared 0
+	write_manifest "$STATUS" 0
 
 	if [[ "$WAIT_COPY" == true ]]; then
-		echo "INFO: Waiting $COPY_WAIT_TIME seconds after output copying..."
+		echo "INFO: Waiting $COPY_WAIT_TIME seconds after copying..."
 		sleep "$COPY_WAIT_TIME"
 	fi
 
-	echo "INFO: OXKAT 1GC preparation completed."
+	echo "INFO: OXKAT 1GC $STATUS."
 	exit 0
 fi
 
