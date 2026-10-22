@@ -286,8 +286,13 @@ write_manifest() {
 	local status="$1"
 	local code="$2"
 
-	STATUS="$status" EXIT_CODE="$code" OUT_DIR="$OUT_DIR" INPUT_MS="$INPUT_MS" STAGE="$STAGE" \
+#	STATUS="$status" EXIT_CODE="$code" OUT_DIR="$OUT_DIR" INPUT_MS="$INPUT_MS" STAGE="$STAGE" \
 	
+	STATUS="$status" \
+	EXIT_CODE="$code" \
+	OUT_DIR="$OUT_DIR" \
+	INPUT_MS="$INPUT_MS" \
+	STAGE="$STAGE" \
 	/usr/bin/python3 - <<'PYMANIFEST'
 import json
 import os
