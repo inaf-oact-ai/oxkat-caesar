@@ -197,13 +197,18 @@ read -r -a OXKAT_ARGS <<< "$JOB_ARGS"
 # - Check the supported scientific options
 HAS_STAGE=false
 HAS_MS=false
+HAS_PROJECT_INFO=false
+
 for arg in "${OXKAT_ARGS[@]}"; do
 	case "$arg" in
-		--stage=GET_INFO)
+		--stage=GET_INFO|--stage=1GC)
 			HAS_STAGE=true
 		;;
 		--input-ms=/*)
 			HAS_MS=true
+		;;
+		--project-info=/*)
+    	HAS_PROJECT_INFO=true
 		;;
 		--oxkat-home=/*)
 			# - Optional override of the oxkat source directory
@@ -216,9 +221,15 @@ for arg in "${OXKAT_ARGS[@]}"; do
 done
 
 if [ "$HAS_STAGE" != true ] || [ "$HAS_MS" != true ]; then
-	echo 'ERROR: oxkat requires --stage=GET_INFO and --input-ms=/absolute/directory' >&2
+	echo 'ERROR: oxkat requires --stage and --input-ms' >&2
 	exit 2
 fi
+
+if [[ " ${OXKAT_ARGS[*]} " == *"--stage=1GC"* ]] && [ "$HAS_PROJECT_INFO" != true ]; then
+	echo 'ERROR: 1GC requires --project-info' >&2
+	exit 2
+fi
+
 
 # - Select the oxkat runner included in the container
 OXKAT_EXE="${OXKAT_RUNNER_PATH:-/opt/caesar/run_oxkat.sh}"
