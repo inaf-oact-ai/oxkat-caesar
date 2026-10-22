@@ -22,7 +22,7 @@ usage() {
   cat <<'USAGE'
 Usage: run_oxkat.sh --stage=GET_INFO --jobdir=DIR --input-ms=PATH [--outdir=DIR] [--run]
 Options:
-  --stage=GET_INFO|GC1			First supported oxkat stage (future stages deliberately rejected).
+  --stage=GET_INFO|1GC			First supported oxkat stage (future stages deliberately rejected).
   --jobdir=DIR							Private, writable, per-run workspace.
   --input-ms=PATH						Existing Measurement Set directory visible inside container.
 	--project-info=PATH       Path to the project_info.json artifact produced by the upstream GET_INFO stage. Required for 1GC; supplies observation metadata and calibration configuration.
