@@ -210,6 +210,16 @@ for arg in "${OXKAT_ARGS[@]}"; do
 		--project-info=/*)
     	HAS_PROJECT_INFO=true
 		;;
+		--oxkat-config=*)
+			# - Encoded scientific options produced by CAESAR-REST.
+			# - The scientific content is validated by run_oxkat.sh.
+			CONFIG_TOKEN="${arg#*=}"
+
+			if [[ ! "$CONFIG_TOKEN" =~ ^[A-Za-z0-9_-]{1,3000}$ ]]; then
+				echo 'ERROR: Invalid OXKAT configuration token' >&2
+				exit 2
+			fi
+		;;
 		--oxkat-home=/*)
 			# - Optional override of the oxkat source directory
 		;;
@@ -261,6 +271,13 @@ OXKAT_CMD+=("${OXKAT_ARGS[@]}")
 #print("Astropy config:", get_config_dir())
 #print("Astropy cache:", get_cache_dir())
 #'
+
+# - Use a locale available in the container.
+# - Avoid unsupported en_US.UTF-8 settings inherited from the host.
+export LANG=C
+export LANGUAGE=C
+export LC_ALL=C
+export LC_NUMERIC=C
 
 # - Execute oxkat.
 #   Kubernetes may start this entrypoint as root and switch to RUNUSER.

@@ -47,6 +47,7 @@ JOB_DIR=""
 INPUT_MS=""
 PROJECT_INFO=""
 OUT_DIR=""
+OXKAT_CONFIG_TOKEN=""
 OXKAT_HOME="${OXKAT_HOME:-/opt/oxkat}"
 RUN=false
 
@@ -71,7 +72,11 @@ for arg in "$@"; do
 		--project-info=*)
 			PROJECT_INFO="${arg#*=}"
 		;;
-		
+				
+		--oxkat-config=*)
+			OXKAT_CONFIG_TOKEN="${arg#*=}"
+		;;
+
 		--outdir=*)
 			OUT_DIR="${arg#*=}"
 		;;
@@ -270,6 +275,176 @@ p.write_text(content)
 PY
 
 # -----------------------------------------------------------------------------
+# Apply stage-specific scientific configuration overrides
+# -----------------------------------------------------------------------------
+# Only the private copy of oxkat/config.py may be modified.
+# Input is an internally encoded JSON document, not Python source code.
+
+if [[ -n "$OXKAT_CONFIG_TOKEN" ]]; then
+
+	echo "INFO: Applying OXKAT scientific configuration overrides..."
+
+	/usr/bin/python3 - \
+		"$JOB_DIR/oxkat/config.py" \
+		"$STAGE" \
+		"$OXKAT_CONFIG_TOKEN" \
+		"$JOB_DIR/oxkat_config_overrides.json" <<'PY'
+import base64
+import json
+import math
+import pathlib
+import re
+import sys
+
+config_path = pathlib.Path(sys.argv[1])
+stage = sys.argv[2]
+token = sys.argv[3]
+record_path = pathlib.Path(sys.argv[4])
+
+# - Independently enforce the container's supported scientific contract.
+# - This is not a substitute for CAESAR-REST application validation.
+allowed = {
+	'CAL_1GC_PRIMARY': ('field_selection', ('GET_INFO',)),
+	'CAL_1GC_SECONDARIES': ('field_selection', ('GET_INFO',)),
+	'CAL_1GC_TARGETS': ('field_selection', ('GET_INFO',)),
+	'PRE_NCHANS': ('integer', ('1GC',)),
+	'WSC_CIRCULARBEAM': (
+		'boolean', ('FLAG', '2GC', '3GC_PEEL', '3GC_FACET')
+	),
+	'WSC_NITER': (
+		'integer', ('FLAG', '2GC', '3GC_PEEL', '3GC_FACET')
+	),
+	'WSC_BRIGGS': (
+		'number', ('FLAG', '2GC', '3GC_PEEL', '3GC_FACET')
+	),
+}
+
+ranges = {
+	'PRE_NCHANS': (1, 65536),
+	'WSC_NITER': (0, 10000000),
+	'WSC_BRIGGS': (-2.0, 2.0),
+}
+
+if not re.fullmatch(r'[A-Za-z0-9_-]{1,3000}', token):
+	raise SystemExit('Invalid encoded OXKAT configuration')
+
+try:
+	padding = '=' * (-len(token) % 4)
+	raw = base64.b64decode(
+		(token + padding).encode('ascii'),
+		altchars=b'-_',
+		validate=True
+	)
+	document = json.loads(raw.decode('utf-8'))
+except (ValueError, UnicodeError) as exc:
+	raise SystemExit('Cannot decode OXKAT configuration: %s' % exc)
+
+if not isinstance(document, dict) or set(document) != {'stage', 'overrides'}:
+	raise SystemExit('Invalid OXKAT configuration document')
+
+if document['stage'] != stage:
+	raise SystemExit('OXKAT configuration stage mismatch')
+
+overrides = document['overrides']
+
+if not isinstance(overrides, dict) or not 0 < len(overrides) <= 32:
+	raise SystemExit('Invalid OXKAT override collection')
+
+validated = {}
+
+for name, value in overrides.items():
+	if name not in allowed:
+		raise SystemExit('Unsupported OXKAT option: %s' % name)
+
+	value_type, stages = allowed[name]
+
+	if stage not in stages:
+		raise SystemExit(
+			'OXKAT option %s is not applicable to %s' % (name, stage)
+		)
+
+	if value_type == 'boolean':
+		if type(value) is not bool:
+			raise SystemExit('%s requires a boolean' % name)
+
+	elif value_type == 'integer':
+		if type(value) is not int:
+			raise SystemExit('%s requires an integer' % name)
+
+	elif value_type == 'number':
+		if type(value) not in (int, float):
+			raise SystemExit('%s requires a number' % name)
+
+		value = float(value)
+
+		if not math.isfinite(value):
+			raise SystemExit('%s must be finite' % name)
+
+	elif value_type == 'field_selection':
+		if (
+			not isinstance(value, str)
+			or len(value) > 128
+			or not re.fullmatch(r'(?:auto|[0-9]+(?:,[0-9]+)*)', value)
+		):
+			raise SystemExit('%s has an invalid field selection' % name)
+
+	if name in ranges:
+		minimum, maximum = ranges[name]
+
+		if value < minimum or value > maximum:
+			raise SystemExit('%s is outside the allowed range' % name)
+
+	validated[name] = value
+
+# - Replace exactly one top-level assignment for each requested option.
+# - Never evaluate client-provided Python expressions.
+content = config_path.read_text()
+
+for name in sorted(validated):
+	value = validated[name]
+
+	# - JSON strings have the same safe quoted representation needed here.
+	# - Booleans must use Python's True/False spelling.
+	if type(value) is bool:
+		literal = 'True' if value else 'False'
+	else:
+		literal = repr(value)
+
+	pattern = r'(?m)^' + re.escape(name) + r'\s*=\s*[^\r\n]*$'
+
+	replacement = '%s = %s' % (name, literal)
+
+	content, matches = re.subn(
+		pattern,
+		lambda match: replacement,
+		content
+	)
+
+	if matches != 1:
+		raise SystemExit(
+			'Expected exactly one assignment for %s; found %d' %
+			(name, matches)
+		)
+
+config_path.write_text(content)
+
+record = {
+	'stage': stage,
+	'overrides': validated,
+}
+
+record_path.write_text(
+	json.dumps(record, sort_keys=True, indent=2) + '\n'
+)
+
+for name in sorted(validated):
+	print('INFO: OXKAT override %s=%r' % (name, validated[name]))
+PY
+
+fi
+
+
+# -----------------------------------------------------------------------------
 # Activate and verify the run-specific oxkat Python package
 # -----------------------------------------------------------------------------
 # The setup scripts may be symlinked to the shared source checkout. Putting
@@ -277,11 +452,33 @@ PY
 # Check this explicitly before generating any scientific command.
 cd "$JOB_DIR"
 export PYTHONPATH="$JOB_DIR${PYTHONPATH:+:$PYTHONPATH}"
+
 /usr/bin/python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
 from oxkat import config
+
 assert config.USE_SINGULARITY is False
-assert config.CWD == __import__('os').getcwd()
+assert config.CWD == os.getcwd()
 assert config.__file__.startswith(config.CWD + '/oxkat/')
+
+record_path = Path('oxkat_config_overrides.json')
+
+if record_path.is_file():
+	with record_path.open() as stream:
+		record = json.load(stream)
+
+	for name, expected in record['overrides'].items():
+		actual = getattr(config, name)
+
+		if actual != expected or type(actual) is not type(expected):
+			raise SystemExit(
+				'Applied OXKAT configuration mismatch: %s' % name
+			)
+
+	print('INFO: OXKAT scientific configuration verified.')
 PY
 
 # -----------------------------------------------------------------------------
@@ -327,6 +524,7 @@ manifest = {
 			'submit_1GC_jobs.sh' if os.environ['STAGE'] == '1GC' else 'submit_info_job.sh'
 		),
 		'logs': logs,
+		'oxkat_config_overrides': artifact('oxkat_config_overrides.json'),
 	},
 }
 
@@ -355,6 +553,12 @@ copy_outputs() {
 	if [[ -f "$JOB_DIR/$SCRIPT_NAME" ]]; then
 		cp -f "$JOB_DIR/$SCRIPT_NAME" "$OUT_DIR/"
 	fi	
+
+	if [[ -f "$JOB_DIR/oxkat_config_overrides.json" ]]; then
+		cp -f \
+			"$JOB_DIR/oxkat_config_overrides.json" \
+			"$OUT_DIR/oxkat_config_overrides.json"
+	fi
 
 	for logfile in "$JOB_DIR"/*.log "$JOB_DIR"/LOGS/*.log; do
 		if [[ ! -f "$logfile" ]]; then
