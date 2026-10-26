@@ -371,7 +371,6 @@ if [[ -n "$OXKAT_CONFIG_TOKEN" ]]; then
 		"$JOB_DIR/oxkat_config_overrides.json" <<'PY'
 import base64
 import json
-import math
 import pathlib
 import re
 import sys
@@ -380,30 +379,6 @@ config_path = pathlib.Path(sys.argv[1])
 stage = sys.argv[2]
 token = sys.argv[3]
 record_path = pathlib.Path(sys.argv[4])
-
-# - Independently enforce the container's supported scientific contract.
-# - This is not a substitute for CAESAR-REST application validation.
-allowed = {
-	'CAL_1GC_PRIMARY': ('field_selection', ('GET_INFO',)),
-	'CAL_1GC_SECONDARIES': ('field_selection', ('GET_INFO',)),
-	'CAL_1GC_TARGETS': ('field_selection', ('GET_INFO',)),
-	'PRE_NCHANS': ('integer', ('1GC',)),
-	'WSC_CIRCULARBEAM': (
-		'boolean', ('FLAG', '2GC', '3GC_PEEL', '3GC_FACET')
-	),
-	'WSC_NITER': (
-		'integer', ('FLAG', '2GC', '3GC_PEEL', '3GC_FACET')
-	),
-	'WSC_BRIGGS': (
-		'number', ('FLAG', '2GC', '3GC_PEEL', '3GC_FACET')
-	),
-}
-
-ranges = {
-	'PRE_NCHANS': (1, 65536),
-	'WSC_NITER': (0, 10000000),
-	'WSC_BRIGGS': (-2.0, 2.0),
-}
 
 if not re.fullmatch(r'[A-Za-z0-9_-]{1,3000}', token):
 	raise SystemExit('Invalid encoded OXKAT configuration')
@@ -425,88 +400,22 @@ if not isinstance(document, dict) or set(document) != {'stage', 'overrides'}:
 if document['stage'] != stage:
 	raise SystemExit('OXKAT configuration stage mismatch')
 
-overrides = document['overrides']
+# Validate independently using the same reviewed scientific schema.
+# The schema is installed inside the Singularity image.
+sys.path.insert(0, '/opt/caesar')
 
-if not isinstance(overrides, dict) or not 0 < len(overrides) <= 32:
-	raise SystemExit('Invalid OXKAT override collection')
+import oxkat_scientific_config
 
-validated = {}
-
-for name, value in overrides.items():
-	if name not in allowed:
-		raise SystemExit('Unsupported OXKAT option: %s' % name)
-
-	value_type, stages = allowed[name]
-
-	if stage not in stages:
-		raise SystemExit(
-			'OXKAT option %s is not applicable to %s' % (name, stage)
-		)
-
-	if value_type == 'boolean':
-		if type(value) is not bool:
-			raise SystemExit('%s requires a boolean' % name)
-
-	elif value_type == 'integer':
-		if type(value) is not int:
-			raise SystemExit('%s requires an integer' % name)
-
-	elif value_type == 'number':
-		if type(value) not in (int, float):
-			raise SystemExit('%s requires a number' % name)
-
-		value = float(value)
-
-		if not math.isfinite(value):
-			raise SystemExit('%s must be finite' % name)
-
-	elif value_type == 'field_selection':
-		if (
-			not isinstance(value, str)
-			or len(value) > 128
-			or not re.fullmatch(r'(?:auto|[0-9]+(?:,[0-9]+)*)', value)
-		):
-			raise SystemExit('%s has an invalid field selection' % name)
-
-	if name in ranges:
-		minimum, maximum = ranges[name]
-
-		if value < minimum or value > maximum:
-			raise SystemExit('%s is outside the allowed range' % name)
-
-	validated[name] = value
-
-# - Replace exactly one top-level assignment for each requested option.
-# - Never evaluate client-provided Python expressions.
-content = config_path.read_text()
-
-for name in sorted(validated):
-	value = validated[name]
-
-	# - JSON strings have the same safe quoted representation needed here.
-	# - Booleans must use Python's True/False spelling.
-	if type(value) is bool:
-		literal = 'True' if value else 'False'
-	else:
-		literal = repr(value)
-
-	pattern = r'(?m)^' + re.escape(name) + r'\s*=\s*[^\r\n]*$'
-
-	replacement = '%s = %s' % (name, literal)
-
-	content, matches = re.subn(
-		pattern,
-		lambda match: replacement,
-		content
+try:
+	validated = oxkat_scientific_config.append_overrides(
+		config_path,
+		document['overrides'],
+		stage
 	)
-
-	if matches != 1:
-		raise SystemExit(
-			'Expected exactly one assignment for %s; found %d' %
-			(name, matches)
-		)
-
-config_path.write_text(content)
+except (ValueError, SyntaxError, OSError) as exc:
+	raise SystemExit(
+		'Invalid OXKAT scientific configuration: %s' % exc
+	)
 
 record = {
 	'stage': stage,
