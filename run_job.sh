@@ -198,11 +198,17 @@ read -r -a OXKAT_ARGS <<< "$JOB_ARGS"
 HAS_STAGE=false
 HAS_MS=false
 HAS_PROJECT_INFO=false
+OXKAT_STAGE=""
 
 for arg in "${OXKAT_ARGS[@]}"; do
 	case "$arg" in
-		--stage=GET_INFO|--stage=1GC)
+		--stage=GET_INFO|--stage=1GC|--stage=FLAG)
+			if [ "$HAS_STAGE" = true ]; then
+				echo 'ERROR: Duplicate OXKAT stage option' >&2
+				exit 2
+			fi
 			HAS_STAGE=true
+			OXKAT_STAGE="${arg#*=}"
 		;;
 		--input-ms=/*)
 			HAS_MS=true
@@ -235,11 +241,13 @@ if [ "$HAS_STAGE" != true ] || [ "$HAS_MS" != true ]; then
 	exit 2
 fi
 
-if [[ " ${OXKAT_ARGS[*]} " == *"--stage=1GC"* ]] && [ "$HAS_PROJECT_INFO" != true ]; then
-	echo 'ERROR: 1GC requires --project-info' >&2
-	exit 2
-fi
 
+if [[ "$OXKAT_STAGE" == "1GC" || "$OXKAT_STAGE" == "FLAG" ]]; then
+	if [ "$HAS_PROJECT_INFO" != true ]; then
+		echo "ERROR: $OXKAT_STAGE requires --project-info" >&2
+		exit 2
+	fi
+fi
 
 # - Select the oxkat runner included in the container
 OXKAT_EXE="${OXKAT_RUNNER_PATH:-/opt/caesar/run_oxkat.sh}"

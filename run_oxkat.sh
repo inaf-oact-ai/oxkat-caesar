@@ -22,17 +22,17 @@ set -Eeuo pipefail
 # --run, --jobdir, --outdir and optional copy-wait flags to the app runner.
 usage() {
   cat <<'USAGE'
-Usage: run_oxkat.sh --stage=GET_INFO --jobdir=DIR --input-ms=PATH [--outdir=DIR] [--run]
+Usage: run_oxkat.sh --stage=STAGE --jobdir=DIR --input-ms=PATH [--project-info=PATH] [--outdir=DIR] [--run]
 Options:
-  --stage=GET_INFO|1GC			First supported oxkat stage (future stages deliberately rejected).
-  --jobdir=DIR							Private, writable, per-run workspace.
-  --input-ms=PATH						Existing Measurement Set directory visible inside container.
-	--project-info=PATH				Path to the project_info.json artifact produced by the upstream GET_INFO stage. Required for 1GC; supplies observation metadata and calibration configuration.
-  --outdir=DIR							Directory for compact result manifest and diagnostic files.
-  --oxkat-home=DIR					Location of cloned oxkat repo (default: /opt/oxkat).
-  --run											Execute the generated script (otherwise prepare only).
-  --waitcopy								Wait after copying output products (default: disabled).
-  --copywaittime=N					Delay in seconds after copying (default: 30).
+  --stage=GET_INFO|1GC|FLAG
+  --jobdir=DIR         Private per-run execution directory.
+  --input-ms=PATH      Original MS for GET_INFO/1GC; private staged target MS for FLAG.
+  --project-info=PATH  Retained project_info.json; required for 1GC and FLAG.
+  --outdir=DIR         Directory for published scientific outputs.
+  --oxkat-home=DIR     OXKAT checkout (default: /opt/oxkat).
+  --run                Execute the generated scientific script.
+  --waitcopy           Wait after output publication (default: disabled).
+  --copywaittime=N     Optional output synchronization delay (default: 30).
 USAGE
 }
 
@@ -115,14 +115,17 @@ done
 # -----------------------------------------------------------------------------
 # Deliberately reject unsupported stages; new stages require their own
 # validation, expected outputs and scientific parameters before enabling.
-if [[ "$STAGE" != "GET_INFO" && "$STAGE" != "1GC" ]]; then
+if [[ "$STAGE" != "GET_INFO" && \
+      "$STAGE" != "1GC" && \
+      "$STAGE" != "FLAG" ]]; then      
 	echo 'ERROR: Unsupported oxkat stage.' >&2
 	exit 2
 fi
 
-if [[ "$STAGE" == "1GC" ]]; then
+
+if [[ "$STAGE" == "1GC" || "$STAGE" == "FLAG" ]]; then
 	if [[ -z "$PROJECT_INFO" || ! -s "$PROJECT_INFO" ]]; then
-		echo 'ERROR: 1GC requires a nonempty project_info.json.' >&2
+		echo "ERROR: $STAGE requires nonempty project_info.json" >&2
 		exit 2
 	fi
 fi
@@ -139,12 +142,21 @@ fi
 
 # - V1 supplies the original *.ms directory.
 # - V2 supplies the authorized read-only reference named measurement_set.
-if [[ "$INPUT_MS" != *.ms && "$(basename "$INPUT_MS")" != "measurement_set" ]]; then
-	echo 'ERROR: --input-ms must be a *.ms directory or the V2 measurement_set input.' >&2
-	exit 2
+
+if [[ "$STAGE" == "FLAG" ]]; then
+	if [[ "$(basename "$INPUT_MS")" != "target_ms" ]]; then
+		echo 'ERROR: FLAG requires the V2 target_ms input' >&2
+		exit 2
+	fi
+else
+	if [[ "$INPUT_MS" != *.ms && "$(basename "$INPUT_MS")" != "measurement_set" ]]; then
+		echo 'ERROR: Invalid GET_INFO/1GC Measurement Set input' >&2
+		exit 2
+	fi
 fi
 
-for required in oxkat/config.py setups/0_GET_INFO.py setups/1GC.py tools/ms_info.py data; do
+
+for required in oxkat/config.py setups/0_GET_INFO.py setups/1GC.py setups/FLAG.py tools/ms_info.py data; do
 	if [[ ! -e "$OXKAT_HOME/$required" ]]; then
 		echo "ERROR: Missing $OXKAT_HOME/$required" >&2
 		exit 2
@@ -172,7 +184,7 @@ fi
 mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"
 
-if [[ "$STAGE" == "1GC" && "$RUN" == true && "$OUT_DIR" == "$JOB_DIR" ]]; then
+if [[ "$STAGE" != "GET_INFO" && "$RUN" == true && "$OUT_DIR" == "$JOB_DIR" ]]; then
 	echo 'ERROR: 1GC execution requires a separate output directory.' >&2
 	exit 2
 fi
@@ -217,27 +229,92 @@ ln -s "$OXKAT_HOME/data" "$JOB_DIR/data"
 # - Preserve the original Measurement Set name for V1.
 # - Give the generic V2 input a conventional *.ms name so oxkat's
 #   existing setup scripts can discover it without modification.
+
 MS_NAME="$(basename "$INPUT_MS")"
 
-if [[ "$MS_NAME" == "measurement_set" ]]; then
-	MS_NAME="measurement_set.ms"
-fi
+if [[ "$STAGE" == "FLAG" ]]; then
+	# FLAG must use the private V2-staged target MS, never the
+	# immutable retained upstream artifact.
+	WORKSPACE_ROOT="$(dirname "$JOB_DIR")"
+	EXPECTED_INPUT="$WORKSPACE_ROOT/inputs/target_ms"
 
-ln -s "$INPUT_MS" "$JOB_DIR/$MS_NAME"
+	if [[ "$INPUT_MS" != "$EXPECTED_INPUT" ]]; then
+		echo 'ERROR: FLAG input is not the private V2 target_ms' >&2
+		exit 2
+	fi
 
-mkdir -p "$JOB_DIR"/{LOGS,SCRIPTS,GAINTABLES,GAINPLOTS,IMAGES,VISPLOTS}
-
-
-# -----------------------------------------------------------------------------
-# Restore and validate GET_INFO metadata for the 1GC stage
-# -----------------------------------------------------------------------------
-# project_info.json must exist before importing oxkat.config because
-# the configuration reads the observing band from this file.
-if [[ "$STAGE" == "1GC" ]]; then
+	if [[ ! -d "$INPUT_MS" || -L "$INPUT_MS" || ! -w "$INPUT_MS" ]]; then
+		echo 'ERROR: FLAG target MS is not a writable private directory' >&2
+		exit 2
+	fi
 
 	cp -- "$PROJECT_INFO" "$JOB_DIR/project_info.json"
 
-	/usr/bin/python3 - "$JOB_DIR/project_info.json" "$MS_NAME" <<'PY'
+	# Validate the upstream metadata and obtain the target MS name.
+	# Initial FLAG implementation deliberately supports one target.
+	MS_NAME=$(/usr/bin/python3 - "$JOB_DIR/project_info.json" <<'PY'
+import json
+import pathlib
+import sys
+
+with open(sys.argv[1]) as stream:
+	info = json.load(stream)
+
+if not isinstance(info, dict):
+	raise SystemExit('Invalid project_info.json')
+
+names = info.get('target_ms')
+ids = info.get('target_ids')
+targets = info.get('target_names')
+
+if (
+	not isinstance(names, list)
+	or not isinstance(ids, list)
+	or not isinstance(targets, list)
+	or len(names) != 1
+	or len(ids) != 1
+	or len(targets) != 1
+):
+	raise SystemExit('FLAG currently requires exactly one target')
+
+name = names[0]
+
+if (
+	not isinstance(name, str)
+	or pathlib.PurePosixPath(name).name != name
+	or not name.endswith('.ms')
+	or name in ('.', '..')
+	or not info.get('band')
+):
+	raise SystemExit('Invalid FLAG target metadata')
+
+print(name)
+PY
+	)
+
+	echo "INFO: FLAG target Measurement Set: $MS_NAME"
+
+	# Upstream FLAG.py reads project_info.json and expects this
+	# basename in its current execution directory.
+	# The link targets only the private staged copy.
+	if [[ -e "$JOB_DIR/$MS_NAME" || -L "$JOB_DIR/$MS_NAME" ]]; then
+		echo 'ERROR: FLAG target name already exists in job directory' >&2
+		exit 2
+	fi
+
+	ln -s "$INPUT_MS" "$JOB_DIR/$MS_NAME"
+
+else
+	if [[ "$MS_NAME" == "measurement_set" ]]; then
+		MS_NAME="measurement_set.ms"
+	fi
+
+	ln -s "$INPUT_MS" "$JOB_DIR/$MS_NAME"
+
+	if [[ "$STAGE" == "1GC" ]]; then
+		cp -- "$PROJECT_INFO" "$JOB_DIR/project_info.json"
+
+		/usr/bin/python3 - "$JOB_DIR/project_info.json" "$MS_NAME" <<'PY'
 import json
 import sys
 
@@ -253,8 +330,11 @@ if info.get('master_ms') != sys.argv[2]:
 if not info.get('band'):
 	raise SystemExit('Missing observing band')
 PY
-
+	fi
 fi
+
+mkdir -p "$JOB_DIR"/{LOGS,SCRIPTS,GAINTABLES,GAINPLOTS,IMAGES,VISPLOTS}
+
 
 # -----------------------------------------------------------------------------
 # Disable nested Singularity calls in this run-specific config
@@ -520,9 +600,11 @@ manifest = {
 	'input_ms_name': Path(os.environ['INPUT_MS']).name,
 	'artifacts': {
 		'project_info': artifact('project_info.json'),
-		'execution_script': artifact(
-			'submit_1GC_jobs.sh' if os.environ['STAGE'] == '1GC' else 'submit_info_job.sh'
-		),
+		'execution_script': artifact({
+			'GET_INFO': 'submit_info_job.sh',
+			'1GC': 'submit_1GC_jobs.sh',
+			'FLAG': 'submit_flag_jobs.sh',
+		}[os.environ['STAGE']]),
 		'logs': logs,
 		'oxkat_config_overrides': artifact('oxkat_config_overrides.json'),
 	},
@@ -544,11 +626,17 @@ copy_outputs() {
 
 	echo "INFO: Collecting oxkat diagnostic outputs..."
 	
-	if [[ "$STAGE" == "1GC" ]]; then
-		SCRIPT_NAME="submit_1GC_jobs.sh"
-	else
-		SCRIPT_NAME="submit_info_job.sh"
-	fi
+	case "$STAGE" in
+		GET_INFO)
+			SCRIPT_NAME="submit_info_job.sh"
+			;;
+		1GC)
+			SCRIPT_NAME="submit_1GC_jobs.sh"
+			;;
+		FLAG)
+			SCRIPT_NAME="submit_flag_jobs.sh"
+			;;
+	esac
 
 	if [[ -f "$JOB_DIR/$SCRIPT_NAME" ]]; then
 		cp -f "$JOB_DIR/$SCRIPT_NAME" "$OUT_DIR/"
@@ -661,6 +749,89 @@ PY
 }
 
 
+# -----------------------------------------------------------------------------
+# Validate and publish the FLAG scientific products
+# -----------------------------------------------------------------------------
+publish_flag_products() {
+	local published_ms="$OUT_DIR/$MS_NAME"
+	local source_ms="$INPUT_MS"
+	local source_flags="$JOB_DIR/$MS_NAME.flagversions"
+	local image_path
+
+	echo "INFO: Validating OXKAT FLAG products..."
+
+	# The source must still be the private V2 input directory.
+	if [[ "$source_ms" != "$(dirname "$JOB_DIR")/inputs/target_ms" ]]; then
+		echo 'ERROR: FLAG source is not private staged target_ms' >&2
+		return 1
+	fi
+
+	if [[ ! -d "$source_ms" || -L "$source_ms" ]]; then
+		echo 'ERROR: Private flagged target MS is missing' >&2
+		return 1
+	fi
+
+	if [[ ! -L "$JOB_DIR/$MS_NAME" ]]; then
+		echo 'ERROR: Expected FLAG workspace link is missing' >&2
+		return 1
+	fi
+
+	# Require an initial cleaning mask created by FLAG.
+	if ! compgen -G "$JOB_DIR/IMAGES/*.mask0.fits" > /dev/null; then
+		echo 'ERROR: FLAG did not produce an initial cleaning mask' >&2
+		return 1
+	fi
+
+	# Require at least one initial WSClean image.
+	if ! compgen -G "$JOB_DIR/IMAGES/*-MFS-image.fits" > /dev/null; then
+		echo 'ERROR: FLAG did not produce the initial WSClean image' >&2
+		return 1
+	fi
+
+	# Never replace an existing scientific result.
+	if [[ -e "$published_ms" || -L "$published_ms" ]]; then
+		echo "ERROR: FLAG output already exists: $published_ms" >&2
+		return 1
+	fi
+
+	if [[ -e "$OUT_DIR/IMAGES" || -L "$OUT_DIR/IMAGES" ]]; then
+		echo 'ERROR: FLAG IMAGES output already exists' >&2
+		return 1
+	fi
+
+	# Publish the actual directory, NOT the workspace symlink.
+	# This is the private, previously integrity-verified V2 copy.
+	mv -- "$source_ms" "$published_ms"
+
+	# Remove only our own workspace reference.
+	rm -- "$JOB_DIR/$MS_NAME"
+
+	# Publish imaging products.
+	if [[ ! -d "$JOB_DIR/IMAGES" || -L "$JOB_DIR/IMAGES" ]]; then
+		echo 'ERROR: FLAG IMAGES directory unavailable' >&2
+		return 1
+	fi
+
+	mv -- "$JOB_DIR/IMAGES" "$OUT_DIR/IMAGES"
+
+	# CASA may produce flag-version history beside the MS link.
+	if [[ -e "$source_flags" || -L "$source_flags" ]]; then
+		if [[ ! -d "$source_flags" || -L "$source_flags" ]]; then
+			echo 'ERROR: Invalid FLAG flagversions directory' >&2
+			return 1
+		fi
+		if [[ -e "$OUT_DIR/$MS_NAME.flagversions" ]]; then
+			echo 'ERROR: FLAG flagversions output already exists' >&2
+			return 1
+		fi
+		mv -- "$source_flags" "$OUT_DIR/"
+	fi
+
+	echo "INFO: Published flagged target MS: $MS_NAME"
+	echo 'INFO: OXKAT FLAG scientific products published.'
+}
+
+
 on_error() {
 	local code=$?
 
@@ -737,6 +908,59 @@ if [[ "$STAGE" == "1GC" ]]; then
 	fi
 
 	echo "INFO: OXKAT 1GC $STATUS."
+	exit 0
+fi
+
+# -----------------------------------------------------------------------------
+# Generate and execute target flagging and initial mask-making
+# -----------------------------------------------------------------------------
+if [[ "$STAGE" == "FLAG" ]]; then
+
+	echo "INFO: Preparing OXKAT FLAG stage..."
+
+	/usr/bin/python3 "$JOB_DIR/setups/FLAG.py" node \
+		2>&1 | tee "$JOB_DIR/LOGS/caesar_setup_FLAG.log"
+
+	if [[ ! -s "$JOB_DIR/submit_flag_jobs.sh" ]]; then
+		echo 'ERROR: OXKAT did not generate submit_flag_jobs.sh' >&2
+		false
+	fi
+
+	# Ensure the setup script did not silently skip the target.
+	if ! grep -q 'tricolour' "$JOB_DIR/submit_flag_jobs.sh"; then
+		echo 'ERROR: FLAG recipe contains no Tricolour command' >&2
+		false
+	fi
+
+	if [[ "$RUN" == true ]]; then
+		echo "INFO: Executing OXKAT FLAG processing..."
+
+		bash -o errexit -o pipefail \
+			"$JOB_DIR/submit_flag_jobs.sh" \
+			2>&1 | tee "$JOB_DIR/LOGS/caesar_run_FLAG.log"
+
+		publish_flag_products
+
+		STATUS=completed
+	else
+		echo 'INFO: OXKAT FLAG preparation only.'
+		STATUS=prepared
+	fi
+
+	if [[ "$OUT_DIR" != "$JOB_DIR" ]]; then
+		cp -- "$JOB_DIR/project_info.json" \
+			"$OUT_DIR/project_info.json"
+	fi
+
+	copy_outputs
+	write_manifest "$STATUS" 0
+
+	if [[ "$WAIT_COPY" == true ]]; then
+		echo "INFO: Waiting $COPY_WAIT_TIME seconds after output publication..."
+		sleep "$COPY_WAIT_TIME"
+	fi
+
+	echo "INFO: OXKAT FLAG $STATUS."
 	exit 0
 fi
 
