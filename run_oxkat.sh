@@ -236,7 +236,7 @@ if [[ "$STAGE" == "FLAG" ]]; then
 	# FLAG must use the private V2-staged target MS, never the
 	# immutable retained upstream artifact.
 	WORKSPACE_ROOT="$(dirname "$JOB_DIR")"
-	EXPECTED_INPUT="$WORKSPACE_ROOT/inputs/target_ms"
+	EXPECTED_INPUT="$WORKSPACE_ROOT/input/target_ms"
 
 	if [[ "$INPUT_MS" != "$EXPECTED_INPUT" ]]; then
 		echo 'ERROR: FLAG input is not the private V2 target_ms' >&2
@@ -674,7 +674,7 @@ publish_flag_products() {
 	echo "INFO: Validating OXKAT FLAG products..."
 
 	# Require the expected private V2 staging location.
-	if [[ "$source_ms" != "$(dirname "$JOB_DIR")/inputs/target_ms" ]]; then
+	if [[ "$source_ms" != "$(dirname "$JOB_DIR")/input/target_ms" ]]; then
 		echo 'ERROR: FLAG source is not the private V2 target_ms' >&2
 		return 1
 	fi
