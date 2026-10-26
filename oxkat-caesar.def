@@ -73,23 +73,31 @@ From: oxkat-0.41.sif
     # Forward CAESAR-REST's existing CLI contract without evaluating arguments.
     exec /opt/caesar/run_job.sh "$@"
 
+
 %test
-    # Image-level smoke tests; real MS processing must be run with bind mounts.
+    set -eu
+
     bash -n /opt/caesar/run_job.sh
     bash -n /opt/caesar/run_oxkat.sh
+
     test -s /opt/caesar/oxkat_commit.txt
     test -f /opt/oxkat/oxkat/config.py
     test -f /opt/oxkat/setups/0_GET_INFO.py
+    test -f /opt/oxkat/setups/1GC.py
+    test -f /opt/oxkat/setups/FLAG.py
     test -f /opt/oxkat/tools/ms_info.py
-    test -x /usr/bin/rclone
-    /usr/bin/python3 -c 'import numpy, astropy'
-    
-    # Test scientific configuration registry
     test -f /opt/caesar/oxkat_scientific_config.py
-    /usr/bin/python3 -m py_compile /opt/caesar/oxkat_scientific_config.py
+    test -x /usr/bin/rclone
 
-    /usr/bin/python3 -c '
+    /usr/bin/python3 -c 'import numpy, astropy'
+
+    PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
 import sys
+from pathlib import Path
+
+path = Path("/opt/caesar/oxkat_scientific_config.py")
+compile(path.read_bytes(), str(path), "exec")
+
 sys.path.insert(0, "/opt/caesar")
 import oxkat_scientific_config as cfg
 
@@ -103,5 +111,8 @@ values = cfg.validate({
 
 assert values["WSC_NITER"] == 7500000
 assert len(cfg.SCHEMA) == 133
-print("OXKAT scientific schema validation OK")
+
+print("OXKAT scientific schema syntax and validation OK")
 '
+
+
