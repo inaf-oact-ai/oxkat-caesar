@@ -84,25 +84,24 @@ From: oxkat-0.41.sif
     test -x /usr/bin/rclone
     /usr/bin/python3 -c 'import numpy, astropy'
     
-    # Test config option override
+    # Test scientific configuration registry
+    test -f /opt/caesar/oxkat_scientific_config.py
     /usr/bin/python3 -m py_compile /opt/caesar/oxkat_scientific_config.py
 
-    /usr/bin/python3 - <<'PY'
-			import sys
-			sys.path.insert(0, '/opt/caesar')
+    /usr/bin/python3 -c '
+import sys
+sys.path.insert(0, "/opt/caesar")
+import oxkat_scientific_config as cfg
 
-			import oxkat_scientific_config as cfg
+values = cfg.validate({
+    "WSC_MULTISCALE": True,
+    "WSC_SCALES": "0,3,9,27,81",
+    "WSC_NITER": 7500000,
+    "WSC_GAIN": 0.1,
+    "WSC_MGAIN": 0.4,
+}, "FLAG")
 
-			values = cfg.validate({
-    		'WSC_MULTISCALE': True,
-    		'WSC_SCALES': '0,3,9,27,81',
-    		'WSC_NITER': 7500000,
-    		'WSC_GAIN': 0.1,
-    		'WSC_MGAIN': 0.4,
-			}, 'FLAG')
-
-			assert values['WSC_NITER'] == 7500000
-			assert len(cfg.SCHEMA) == 133
-			print('OXKAT scientific schema validation OK')
-		PY
-    
+assert values["WSC_NITER"] == 7500000
+assert len(cfg.SCHEMA) == 133
+print("OXKAT scientific schema validation OK")
+'
