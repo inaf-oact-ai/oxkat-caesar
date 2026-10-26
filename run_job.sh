@@ -210,12 +210,22 @@ for arg in "${OXKAT_ARGS[@]}"; do
 			HAS_STAGE=true
 			OXKAT_STAGE="${arg#*=}"
 		;;
+		
 		--input-ms=/*)
+			if [ "$HAS_MS" = true ]; then
+				echo 'ERROR: Duplicate --input-ms option' >&2
+				exit 2
+			fi
 			HAS_MS=true
 		;;
 		--project-info=/*)
-    	HAS_PROJECT_INFO=true
+			if [ "$HAS_PROJECT_INFO" = true ]; then
+				echo 'ERROR: Duplicate --project-info option' >&2
+				exit 2
+			fi
+			HAS_PROJECT_INFO=true
 		;;
+
 		--oxkat-config=*)
 			# - Encoded scientific options produced by CAESAR-REST.
 			# - The scientific content is validated by run_oxkat.sh.

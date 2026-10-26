@@ -185,7 +185,7 @@ mkdir -p "$OUT_DIR"
 OUT_DIR="$(cd "$OUT_DIR" && pwd -P)"
 
 if [[ "$STAGE" != "GET_INFO" && "$RUN" == true && "$OUT_DIR" == "$JOB_DIR" ]]; then
-	echo 'ERROR: 1GC execution requires a separate output directory.' >&2
+	echo "ERROR: $STAGE execution requires a separate output directory." >&2
 	exit 2
 fi
 
@@ -577,6 +577,7 @@ write_manifest() {
 	EXIT_CODE="$code" \
 	OUT_DIR="$OUT_DIR" \
 	INPUT_MS="$INPUT_MS" \
+	MS_NAME="$MS_NAME" \
 	STAGE="$STAGE" \
 	/usr/bin/python3 - <<'PYMANIFEST'
 import json
@@ -597,7 +598,7 @@ manifest = {
 	'stage': os.environ['STAGE'],
 	'status': os.environ['STATUS'],
 	'exit_code': int(os.environ['EXIT_CODE']),
-	'input_ms_name': Path(os.environ['INPUT_MS']).name,
+	'input_ms_name': os.environ['MS_NAME'],
 	'artifacts': {
 		'project_info': artifact('project_info.json'),
 		'execution_script': artifact({
@@ -753,83 +754,123 @@ PY
 # Validate and publish the FLAG scientific products
 # -----------------------------------------------------------------------------
 publish_flag_products() {
+
 	local published_ms="$OUT_DIR/$MS_NAME"
 	local source_ms="$INPUT_MS"
-	local source_flags="$JOB_DIR/$MS_NAME.flagversions"
-	local image_path
+	local workspace_flags="$JOB_DIR/$MS_NAME.flagversions"
+	local staged_flags="$(dirname "$INPUT_MS")/target_ms.flagversions"
+	local source_flags=""
+	local published_flags="$OUT_DIR/$MS_NAME.flagversions"
 
 	echo "INFO: Validating OXKAT FLAG products..."
 
-	# The source must still be the private V2 input directory.
+	# Require the expected private V2 staging location.
 	if [[ "$source_ms" != "$(dirname "$JOB_DIR")/inputs/target_ms" ]]; then
-		echo 'ERROR: FLAG source is not private staged target_ms' >&2
+		echo 'ERROR: FLAG source is not the private V2 target_ms' >&2
 		return 1
 	fi
 
 	if [[ ! -d "$source_ms" || -L "$source_ms" ]]; then
-		echo 'ERROR: Private flagged target MS is missing' >&2
+		echo 'ERROR: Private FLAG target MS is missing or symlinked' >&2
 		return 1
 	fi
 
 	if [[ ! -L "$JOB_DIR/$MS_NAME" ]]; then
-		echo 'ERROR: Expected FLAG workspace link is missing' >&2
+		echo 'ERROR: FLAG workspace MS link is missing' >&2
 		return 1
 	fi
 
-	# Require an initial cleaning mask created by FLAG.
+	if [[ "$(readlink -- "$JOB_DIR/$MS_NAME")" != "$source_ms" ]]; then
+		echo 'ERROR: FLAG workspace link points to unexpected data' >&2
+		return 1
+	fi
+
+	# Require scientific imaging and mask products.
+	if [[ ! -d "$JOB_DIR/IMAGES" || -L "$JOB_DIR/IMAGES" ]]; then
+		echo 'ERROR: FLAG IMAGES directory is invalid' >&2
+		return 1
+	fi
+
 	if ! compgen -G "$JOB_DIR/IMAGES/*.mask0.fits" > /dev/null; then
-		echo 'ERROR: FLAG did not produce an initial cleaning mask' >&2
+		echo 'ERROR: FLAG initial cleaning mask not produced' >&2
 		return 1
 	fi
 
-	# Require at least one initial WSClean image.
 	if ! compgen -G "$JOB_DIR/IMAGES/*-MFS-image.fits" > /dev/null; then
-		echo 'ERROR: FLAG did not produce the initial WSClean image' >&2
+		echo 'ERROR: FLAG initial WSClean image not produced' >&2
 		return 1
 	fi
 
-	# Never replace an existing scientific result.
-	if [[ -e "$published_ms" || -L "$published_ms" ]]; then
-		echo "ERROR: FLAG output already exists: $published_ms" >&2
+	# Detect optional flag-version histories at either location.
+	if [[ -e "$workspace_flags" || -L "$workspace_flags" ]]; then
+		[[ -d "$workspace_flags" && ! -L "$workspace_flags" ]] || {
+			echo 'ERROR: Invalid workspace flagversions' >&2
+			return 1
+		}
+		source_flags="$workspace_flags"
+	fi
+
+	if [[ -e "$staged_flags" || -L "$staged_flags" ]]; then
+		[[ -d "$staged_flags" && ! -L "$staged_flags" ]] || {
+			echo 'ERROR: Invalid staged flagversions' >&2
+			return 1
+		}
+
+		if [[ -n "$source_flags" ]]; then
+			echo 'ERROR: Duplicate FLAG flag-version histories' >&2
+			return 1
+		fi
+
+		source_flags="$staged_flags"
+	fi
+
+	# Validate all destinations before moving anything.
+	for destination in \
+		"$published_ms" \
+		"$OUT_DIR/IMAGES" \
+		"$published_flags"; do
+		if [[ -e "$destination" || -L "$destination" ]]; then
+			echo "ERROR: FLAG destination already exists: $destination" >&2
+			return 1
+		fi
+	done
+
+	# Avoid implicit cross-filesystem copy-and-delete behavior.
+	if [[ "$(stat -c %d -- "$source_ms")" != \
+	      "$(stat -c %d -- "$OUT_DIR")" ]]; then
+		echo 'ERROR: FLAG MS publication crosses filesystems' >&2
 		return 1
 	fi
 
-	if [[ -e "$OUT_DIR/IMAGES" || -L "$OUT_DIR/IMAGES" ]]; then
-		echo 'ERROR: FLAG IMAGES output already exists' >&2
+	if [[ "$(stat -c %d -- "$JOB_DIR/IMAGES")" != \
+	      "$(stat -c %d -- "$OUT_DIR")" ]]; then
+		echo 'ERROR: FLAG image publication crosses filesystems' >&2
 		return 1
 	fi
 
-	# Publish the actual directory, NOT the workspace symlink.
-	# This is the private, previously integrity-verified V2 copy.
-	mv -- "$source_ms" "$published_ms"
+	if [[ -n "$source_flags" ]]; then
+		if [[ "$(stat -c %d -- "$source_flags")" != \
+		      "$(stat -c %d -- "$OUT_DIR")" ]]; then
+			echo 'ERROR: FLAG flagversions publication crosses filesystems' >&2
+			return 1
+		fi
+	fi
 
-	# Remove only our own workspace reference.
+	# Publish actual directories, never the MS symlink.
+	mv -T -- "$source_ms" "$published_ms"
+
 	rm -- "$JOB_DIR/$MS_NAME"
 
-	# Publish imaging products.
-	if [[ ! -d "$JOB_DIR/IMAGES" || -L "$JOB_DIR/IMAGES" ]]; then
-		echo 'ERROR: FLAG IMAGES directory unavailable' >&2
-		return 1
-	fi
+	mv -T -- "$JOB_DIR/IMAGES" "$OUT_DIR/IMAGES"
 
-	mv -- "$JOB_DIR/IMAGES" "$OUT_DIR/IMAGES"
-
-	# CASA may produce flag-version history beside the MS link.
-	if [[ -e "$source_flags" || -L "$source_flags" ]]; then
-		if [[ ! -d "$source_flags" || -L "$source_flags" ]]; then
-			echo 'ERROR: Invalid FLAG flagversions directory' >&2
-			return 1
-		fi
-		if [[ -e "$OUT_DIR/$MS_NAME.flagversions" ]]; then
-			echo 'ERROR: FLAG flagversions output already exists' >&2
-			return 1
-		fi
-		mv -- "$source_flags" "$OUT_DIR/"
+	if [[ -n "$source_flags" ]]; then
+		mv -T -- "$source_flags" "$published_flags"
 	fi
 
 	echo "INFO: Published flagged target MS: $MS_NAME"
 	echo 'INFO: OXKAT FLAG scientific products published.'
 }
+
 
 
 on_error() {
