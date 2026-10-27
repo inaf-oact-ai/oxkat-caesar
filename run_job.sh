@@ -198,11 +198,13 @@ read -r -a OXKAT_ARGS <<< "$JOB_ARGS"
 HAS_STAGE=false
 HAS_MS=false
 HAS_PROJECT_INFO=false
+HAS_FLAG_IMAGES=false
 OXKAT_STAGE=""
 
 for arg in "${OXKAT_ARGS[@]}"; do
 	case "$arg" in
-		--stage=GET_INFO|--stage=1GC|--stage=FLAG)
+		
+		--stage=GET_INFO|--stage=1GC|--stage=FLAG|--stage=2GC)
 			if [ "$HAS_STAGE" = true ]; then
 				echo 'ERROR: Duplicate OXKAT stage option' >&2
 				exit 2
@@ -218,6 +220,7 @@ for arg in "${OXKAT_ARGS[@]}"; do
 			fi
 			HAS_MS=true
 		;;
+		
 		--project-info=/*)
 			if [ "$HAS_PROJECT_INFO" = true ]; then
 				echo 'ERROR: Duplicate --project-info option' >&2
@@ -225,6 +228,14 @@ for arg in "${OXKAT_ARGS[@]}"; do
 			fi
 			HAS_PROJECT_INFO=true
 		;;
+
+		--flag-images=/*)
+			if [ "$HAS_FLAG_IMAGES" = true ]; then
+				echo 'ERROR: Duplicate --flag-images option' >&2
+				exit 2
+			fi
+			HAS_FLAG_IMAGES=true
+		;;	
 
 		--oxkat-config=*)
 			# - Encoded scientific options produced by CAESAR-REST.
@@ -236,6 +247,7 @@ for arg in "${OXKAT_ARGS[@]}"; do
 				exit 2
 			fi
 		;;
+		
 		--oxkat-home=/*)
 			# - Optional override of the oxkat source directory
 		;;
@@ -252,12 +264,26 @@ if [ "$HAS_STAGE" != true ] || [ "$HAS_MS" != true ]; then
 fi
 
 
-if [[ "$OXKAT_STAGE" == "1GC" || "$OXKAT_STAGE" == "FLAG" ]]; then
+if [[ "$OXKAT_STAGE" == "1GC" || \
+      "$OXKAT_STAGE" == "FLAG" || \
+      "$OXKAT_STAGE" == "2GC" ]]; then
+
 	if [ "$HAS_PROJECT_INFO" != true ]; then
 		echo "ERROR: $OXKAT_STAGE requires --project-info" >&2
 		exit 2
 	fi
 fi
+
+if [[ "$OXKAT_STAGE" == "2GC" ]]; then
+	if [ "$HAS_FLAG_IMAGES" != true ]; then
+		echo 'ERROR: 2GC requires --flag-images' >&2
+		exit 2
+	fi
+elif [ "$HAS_FLAG_IMAGES" = true ]; then
+	echo 'ERROR: --flag-images is only supported for 2GC' >&2
+	exit 2
+fi
+
 
 # - Select the oxkat runner included in the container
 OXKAT_EXE="${OXKAT_RUNNER_PATH:-/opt/caesar/run_oxkat.sh}"

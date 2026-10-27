@@ -1,18 +1,43 @@
 #!/usr/bin/env bash
-# CAESAR-REST adapter for OXKAT.
-# Supported stages:
-#   GET_INFO: execute observation metadata extraction.
-#   1GC: generate and optionally execute first-generation calibration.
-#        The original Measurement Set remains read-only; calibration
-#        operates on private derived Measurement Sets.
+
+# CAESAR-REST adapter for the OXKAT MeerKAT processing pipeline.
 #
-# Intended invocation: run_job.sh -> run_oxkat.sh -> oxkat generated job script.
-# The input Measurement Set remains in its original storage location; this
-# wrapper creates a private workspace and a lightweight output manifest.
-# MPI execution and later oxkat stages are deliberately out of scope.
+# Supported processing stages:
 #
-# Abort on errors (-e), unset variables (-u), pipeline failures (pipefail),
-# and propagate ERR traps through functions/subshells (-E).
+#   GET_INFO:
+#     Extract observation metadata from an authorized Measurement Set.
+#     The registered source dataset is accessed read-only.
+#
+#   1GC:
+#     Execute first-generation reference calibration using the original
+#     Measurement Set and retained GET_INFO project metadata.
+#     Scientific products are generated in a private workspace.
+#
+#   FLAG:
+#     Apply target flagging, perform initial WSClean imaging, and generate
+#     cleaning masks from the calibrated 1GC Measurement Set.
+#
+#   2GC:
+#     Perform direction-independent self-calibration using the private
+#     FLAG Measurement Set, initial imaging masks, and project metadata.
+#     Execute WSClean imaging, CubiCal calibration, mask refinement,
+#     and primary-beam correction.
+#
+# Execution architecture:
+#
+#   CAESAR-REST -> run_job.sh -> run_oxkat.sh -> OXKAT scientific scripts
+#
+# V2 pipeline inputs are staged and integrity-verified before execution.
+# Stages that modify Measurement Sets operate exclusively on private,
+# writable copies. Retained upstream artifacts remain immutable.
+#
+# Successful scientific products are published to the job output directory
+# and registered as reusable pipeline artifacts. A portable JSON manifest
+# records the stage, completion status, execution script, and diagnostics.
+#
+# The runner supports one target Measurement Set for FLAG and 2GC.
+# MPI execution and third-generation calibration remain unsupported.
+
 set -Eeuo pipefail
 
 # -----------------------------------------------------------------------------
@@ -24,10 +49,11 @@ usage() {
   cat <<'USAGE'
 Usage: run_oxkat.sh --stage=STAGE --jobdir=DIR --input-ms=PATH [--project-info=PATH] [--outdir=DIR] [--run]
 Options:
-  --stage=GET_INFO|1GC|FLAG
+  --stage=GET_INFO|1GC|FLAG|2GC
   --jobdir=DIR         Private per-run execution directory.
-  --input-ms=PATH      Original MS for GET_INFO/1GC; private staged target MS for FLAG.
-  --project-info=PATH  Retained project_info.json; required for 1GC and FLAG.
+  --input-ms=PATH      Original MS for GET_INFO/1GC; private target MS for FLAG/2GC.
+  --project-info=PATH  Retained project_info.json; required for 1GC/FLAG/2GC.
+  --flag-images=PATH   Private staged FLAG image directory; required for 2GC.
   --outdir=DIR         Directory for published scientific outputs.
   --oxkat-home=DIR     OXKAT checkout (default: /opt/oxkat).
   --run                Execute the generated scientific script.
@@ -46,6 +72,7 @@ STAGE=""
 JOB_DIR=""
 INPUT_MS=""
 PROJECT_INFO=""
+FLAG_IMAGES=""
 OUT_DIR=""
 OXKAT_CONFIG_TOKEN=""
 OXKAT_HOME="${OXKAT_HOME:-/opt/oxkat}"
@@ -71,6 +98,10 @@ for arg in "$@"; do
 		
 		--project-info=*)
 			PROJECT_INFO="${arg#*=}"
+		;;
+				
+		--flag-images=*)
+			FLAG_IMAGES="${arg#*=}"
 		;;
 				
 		--oxkat-config=*)
@@ -115,15 +146,16 @@ done
 # -----------------------------------------------------------------------------
 # Deliberately reject unsupported stages; new stages require their own
 # validation, expected outputs and scientific parameters before enabling.
+
 if [[ "$STAGE" != "GET_INFO" && \
       "$STAGE" != "1GC" && \
-      "$STAGE" != "FLAG" ]]; then      
+      "$STAGE" != "FLAG" && \
+      "$STAGE" != "2GC" ]]; then
 	echo 'ERROR: Unsupported oxkat stage.' >&2
 	exit 2
 fi
 
-
-if [[ "$STAGE" == "1GC" || "$STAGE" == "FLAG" ]]; then
+if [[ "$STAGE" == "1GC" || "$STAGE" == "FLAG" || "$STAGE" == "2GC" ]]; then
 	if [[ -z "$PROJECT_INFO" || ! -s "$PROJECT_INFO" ]]; then
 		echo "ERROR: $STAGE requires nonempty project_info.json" >&2
 		exit 2
@@ -142,10 +174,9 @@ fi
 
 # - V1 supplies the original *.ms directory.
 # - V2 supplies the authorized read-only reference named measurement_set.
-
-if [[ "$STAGE" == "FLAG" ]]; then
+if [[ "$STAGE" == "FLAG" || "$STAGE" == "2GC" ]]; then
 	if [[ "$(basename "$INPUT_MS")" != "target_ms" ]]; then
-		echo 'ERROR: FLAG requires the V2 target_ms input' >&2
+		echo "ERROR: $STAGE requires the V2 target_ms input" >&2
 		exit 2
 	fi
 else
@@ -156,7 +187,7 @@ else
 fi
 
 
-for required in oxkat/config.py setups/0_GET_INFO.py setups/1GC.py setups/FLAG.py tools/ms_info.py data; do
+for required in oxkat/config.py setups/0_GET_INFO.py setups/1GC.py setups/FLAG.py setups/2GC.py tools/ms_info.py data; do
 	if [[ ! -e "$OXKAT_HOME/$required" ]]; then
 		echo "ERROR: Missing $OXKAT_HOME/$required" >&2
 		exit 2
@@ -189,7 +220,6 @@ if [[ "$STAGE" != "GET_INFO" && "$RUN" == true && "$OUT_DIR" == "$JOB_DIR" ]]; t
 	exit 2
 fi
 
-
 if [[ "$INPUT_MS" == "$JOB_DIR" || "$INPUT_MS" == "$JOB_DIR/"* ]]; then
 	echo 'ERROR: Input MS must be outside job workspace.' >&2
 	exit 2
@@ -208,6 +238,15 @@ fi
 if [[ -e "$JOB_DIR/oxkat" || -L "$JOB_DIR/oxkat" ]]; then
 	echo 'ERROR: Workspace already contains oxkat/.' >&2
 	exit 2
+fi
+
+if [[ "$STAGE" == "2GC" ]]; then
+	if [[ -z "$FLAG_IMAGES" || ! -d "$FLAG_IMAGES" || -L "$FLAG_IMAGES" ]]; then
+		echo 'ERROR: 2GC requires a private staged flag_images directory' >&2
+		exit 2
+	fi
+
+	FLAG_IMAGES="$(cd "$FLAG_IMAGES" && pwd -P)"
 fi
 
 # -----------------------------------------------------------------------------
@@ -232,19 +271,19 @@ ln -s "$OXKAT_HOME/data" "$JOB_DIR/data"
 
 MS_NAME="$(basename "$INPUT_MS")"
 
-if [[ "$STAGE" == "FLAG" ]]; then
+if [[ "$STAGE" == "FLAG" || "$STAGE" == "2GC" ]]; then
 	# FLAG must use the private V2-staged target MS, never the
 	# immutable retained upstream artifact.
 	WORKSPACE_ROOT="$(dirname "$JOB_DIR")"
 	EXPECTED_INPUT="$WORKSPACE_ROOT/input/target_ms"
 
 	if [[ "$INPUT_MS" != "$EXPECTED_INPUT" ]]; then
-		echo 'ERROR: FLAG input is not the private V2 target_ms' >&2
+		echo "ERROR: $STAGE input is not the private V2 target_ms" >&2
 		exit 2
 	fi
 
 	if [[ ! -d "$INPUT_MS" || -L "$INPUT_MS" || ! -w "$INPUT_MS" ]]; then
-		echo 'ERROR: FLAG target MS is not a writable private directory' >&2
+		echo "ERROR: $STAGE target MS is not a writable private directory" >&2
 		exit 2
 	fi
 
@@ -304,6 +343,34 @@ PY
 
 	ln -s "$INPUT_MS" "$JOB_DIR/$MS_NAME"
 
+	if [[ "$STAGE" == "2GC" ]]; then
+		EXPECTED_IMAGES="$WORKSPACE_ROOT/input/flag_images"
+
+		if [[ "$FLAG_IMAGES" != "$EXPECTED_IMAGES" ]]; then
+			echo 'ERROR: 2GC images are not the private V2 flag_images input' >&2
+			exit 2
+		fi
+
+		if [[ ! -d "$FLAG_IMAGES" || -L "$FLAG_IMAGES" || ! -w "$FLAG_IMAGES" ]]; then
+			echo 'ERROR: Invalid private 2GC FLAG images directory' >&2
+			exit 2
+		fi
+
+		if ! compgen -G "$FLAG_IMAGES/*${MS_NAME}*mask0.fits" > /dev/null; then
+			echo 'ERROR: 2GC initial FLAG cleaning mask is missing' >&2
+			exit 2
+		fi
+
+		if [[ "$(stat -c %d -- "$FLAG_IMAGES")" != \
+		      "$(stat -c %d -- "$JOB_DIR")" ]]; then
+			echo 'ERROR: 2GC image workspace crosses filesystems' >&2
+			exit 2
+		fi
+
+		echo "INFO: 2GC target Measurement Set: $MS_NAME"
+		echo 'INFO: Verified private FLAG imaging input.'
+	fi
+
 else
 	if [[ "$MS_NAME" == "measurement_set" ]]; then
 		MS_NAME="measurement_set.ms"
@@ -335,6 +402,23 @@ fi
 
 mkdir -p "$JOB_DIR"/{LOGS,SCRIPTS,GAINTABLES,GAINPLOTS,IMAGES,VISPLOTS}
 
+if [[ "$STAGE" == "2GC" ]]; then
+	# IMAGES was just created by mkdir.
+	# Replace that empty directory with a symlink to the
+	# already verified, private V2-staged copy.
+
+	rmdir -- "$JOB_DIR/IMAGES"
+
+	ln -s -- "$FLAG_IMAGES" "$JOB_DIR/IMAGES"
+
+	if [[ ! -L "$JOB_DIR/IMAGES" || \
+	      "$(readlink -- "$JOB_DIR/IMAGES")" != "$FLAG_IMAGES" ]]; then
+		echo 'ERROR: Cannot establish 2GC private IMAGES workspace' >&2
+		exit 2
+	fi
+
+	echo 'INFO: Private FLAG images mounted into 2GC workspace.'
+fi
 
 # -----------------------------------------------------------------------------
 # Disable nested Singularity calls in this run-specific config
@@ -514,6 +598,7 @@ manifest = {
 			'GET_INFO': 'submit_info_job.sh',
 			'1GC': 'submit_1GC_jobs.sh',
 			'FLAG': 'submit_flag_jobs.sh',
+			'2GC': 'submit_2GC_jobs.sh',
 		}[os.environ['STAGE']]),
 		'logs': logs,
 		'oxkat_config_overrides': artifact('oxkat_config_overrides.json'),
@@ -546,6 +631,9 @@ copy_outputs() {
 		FLAG)
 			SCRIPT_NAME="submit_flag_jobs.sh"
 			;;
+		2GC)
+			SCRIPT_NAME="submit_2GC_jobs.sh"
+			;;	
 	esac
 
 	if [[ -f "$JOB_DIR/$SCRIPT_NAME" ]]; then
@@ -781,6 +869,154 @@ publish_flag_products() {
 }
 
 
+# -----------------------------------------------------------------------------
+# Validate and publish the 2GC scientific products
+# -----------------------------------------------------------------------------
+publish_2gc_products() {
+
+	local source_ms="$INPUT_MS"
+	local workspace_ms="$JOB_DIR/$MS_NAME"
+	local published_ms="$OUT_DIR/$MS_NAME"
+	local source_images="$FLAG_IMAGES"
+	local workspace_images="$JOB_DIR/IMAGES"
+	local published_images="$OUT_DIR/IMAGES"
+	local source_flags=""
+	local workspace_flags="$JOB_DIR/$MS_NAME.flagversions"
+	local staged_flags="$(dirname "$INPUT_MS")/target_ms.flagversions"
+	local published_flags="$OUT_DIR/$MS_NAME.flagversions"
+	local item
+	local destination
+
+	echo 'INFO: Validating OXKAT 2GC products...'
+
+	# Verify the private staged Measurement Set identity.
+	if [[ "$source_ms" != "$(dirname "$JOB_DIR")/input/target_ms" ]]; then
+		echo 'ERROR: 2GC source is not the private V2 target_ms' >&2
+		return 1
+	fi
+
+	if [[ ! -d "$source_ms" || -L "$source_ms" ]]; then
+		echo 'ERROR: Invalid private 2GC Measurement Set' >&2
+		return 1
+	fi
+
+	if [[ ! -L "$workspace_ms" || \
+	      "$(readlink -- "$workspace_ms")" != "$source_ms" ]]; then
+		echo 'ERROR: Invalid 2GC Measurement Set workspace link' >&2
+		return 1
+	fi
+
+	# IMAGES must resolve to the private staged FLAG images.
+	if [[ "$source_images" != "$(dirname "$JOB_DIR")/input/flag_images" ]]; then
+		echo 'ERROR: Unexpected 2GC image source' >&2
+		return 1
+	fi
+
+	if [[ ! -d "$source_images" || -L "$source_images" ]]; then
+		echo 'ERROR: Missing private 2GC image directory' >&2
+		return 1
+	fi
+
+	if [[ ! -L "$workspace_images" || \
+	      "$(readlink -- "$workspace_images")" != "$source_images" ]]; then
+		echo 'ERROR: Invalid 2GC IMAGES workspace link' >&2
+		return 1
+	fi
+
+	# Ensure that the corrected-data imaging stage ran.
+	if ! compgen -G "$source_images/*_pcalmask-MFS-image.fits" > /dev/null; then
+		echo 'ERROR: 2GC corrected-data MFS image is missing' >&2
+		return 1
+	fi
+
+	# Ensure that the refined cleaning mask was generated.
+	if ! compgen -G "$source_images/*.mask1.fits" > /dev/null; then
+		echo 'ERROR: 2GC refined cleaning mask is missing' >&2
+		return 1
+	fi
+
+	# Require the CubiCal calibration solution products.
+	if [[ ! -d "$JOB_DIR/GAINTABLES" || -L "$JOB_DIR/GAINTABLES" ]]; then
+		echo 'ERROR: Invalid 2GC gain-table directory' >&2
+		return 1
+	fi
+
+	if ! compgen -G "$JOB_DIR/GAINTABLES/delaycal_*" > /dev/null; then
+		echo 'ERROR: 2GC CubiCal calibration solutions are missing' >&2
+		return 1
+	fi
+
+	# Detect optional flag-version histories.
+	if [[ -e "$workspace_flags" || -L "$workspace_flags" ]]; then
+		if [[ ! -d "$workspace_flags" || -L "$workspace_flags" ]]; then
+			echo 'ERROR: Invalid 2GC workspace flagversions' >&2
+			return 1
+		fi
+
+		source_flags="$workspace_flags"
+	fi
+
+	if [[ -e "$staged_flags" || -L "$staged_flags" ]]; then
+		if [[ ! -d "$staged_flags" || -L "$staged_flags" ]]; then
+			echo 'ERROR: Invalid 2GC staged flagversions' >&2
+			return 1
+		fi
+
+		if [[ -n "$source_flags" ]]; then
+			echo 'ERROR: Duplicate 2GC flagversions directories' >&2
+			return 1
+		fi
+
+		source_flags="$staged_flags"
+	fi
+
+	# Reject existing output destinations before moving data.
+	for destination in \
+		"$published_ms" \
+		"$published_images" \
+		"$OUT_DIR/GAINTABLES" \
+		"$published_flags"; do
+
+		if [[ -e "$destination" || -L "$destination" ]]; then
+			echo "ERROR: Existing 2GC output: $destination" >&2
+			return 1
+		fi
+	done
+
+	# No cross-filesystem copy-and-delete during publication.
+	for item in "$source_ms" "$source_images" "$JOB_DIR/GAINTABLES"; do
+		if [[ "$(stat -c %d -- "$item")" != \
+		      "$(stat -c %d -- "$OUT_DIR")" ]]; then
+			echo "ERROR: 2GC publication crosses filesystems: $item" >&2
+			return 1
+		fi
+	done
+
+	if [[ -n "$source_flags" ]]; then
+		if [[ "$(stat -c %d -- "$source_flags")" != \
+		      "$(stat -c %d -- "$OUT_DIR")" ]]; then
+			echo 'ERROR: 2GC flagversions publication crosses filesystems' >&2
+			return 1
+		fi
+	fi
+
+	# Publish actual private directories, never symlinks.
+	mv -T -- "$source_ms" "$published_ms"
+	rm -- "$workspace_ms"
+
+	mv -T -- "$source_images" "$published_images"
+	rm -- "$workspace_images"
+
+	mv -T -- "$JOB_DIR/GAINTABLES" "$OUT_DIR/GAINTABLES"
+
+	if [[ -n "$source_flags" ]]; then
+		mv -T -- "$source_flags" "$published_flags"
+	fi
+
+	echo "INFO: Published 2GC target MS: $MS_NAME"
+	echo 'INFO: OXKAT 2GC scientific products published.'
+}
+
 
 on_error() {
 	local code=$?
@@ -913,6 +1149,61 @@ if [[ "$STAGE" == "FLAG" ]]; then
 	echo "INFO: OXKAT FLAG $STATUS."
 	exit 0
 fi
+
+# -----------------------------------------------------------------------------
+# Generate and execute second-generation calibration
+# -----------------------------------------------------------------------------
+if [[ "$STAGE" == "2GC" ]]; then
+
+	echo 'INFO: Preparing OXKAT 2GC stage...'
+
+	/usr/bin/python3 "$JOB_DIR/setups/2GC.py" node \
+		2>&1 | tee "$JOB_DIR/LOGS/caesar_setup_2GC.log"
+
+	if [[ ! -s "$JOB_DIR/submit_2GC_jobs.sh" ]]; then
+		echo 'ERROR: OXKAT did not generate submit_2GC_jobs.sh' >&2
+		false
+	fi
+
+	# The generated script must include the CubiCal calibration step.
+	if ! grep -Eq 'cubical|gocubical' \
+		"$JOB_DIR/submit_2GC_jobs.sh"; then
+		echo 'ERROR: Generated 2GC script has no CubiCal command' >&2
+		false
+	fi
+
+	if [[ "$RUN" == true ]]; then
+		echo 'INFO: Executing OXKAT 2GC calibration...'
+
+		bash -o errexit -o pipefail \
+			"$JOB_DIR/submit_2GC_jobs.sh" \
+			2>&1 | tee "$JOB_DIR/LOGS/caesar_run_2GC.log"
+
+		publish_2gc_products
+
+		STATUS=completed
+	else
+		echo 'INFO: OXKAT 2GC preparation only.'
+		STATUS=prepared
+	fi
+
+	if [[ "$OUT_DIR" != "$JOB_DIR" ]]; then
+		cp -- "$JOB_DIR/project_info.json" \
+			"$OUT_DIR/project_info.json"
+	fi
+
+	copy_outputs
+	write_manifest "$STATUS" 0
+
+	if [[ "$WAIT_COPY" == true ]]; then
+		echo "INFO: Waiting $COPY_WAIT_TIME seconds after output publication..."
+		sleep "$COPY_WAIT_TIME"
+	fi
+
+	echo "INFO: OXKAT 2GC $STATUS."
+	exit 0
+fi
+
 
 # -----------------------------------------------------------------------------
 # Generate oxkat's GET_INFO local execution script

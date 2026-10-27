@@ -85,6 +85,7 @@ From: oxkat-0.41.sif
     test -f /opt/oxkat/setups/0_GET_INFO.py
     test -f /opt/oxkat/setups/1GC.py
     test -f /opt/oxkat/setups/FLAG.py
+    test -f /opt/oxkat/setups/2GC.py
     test -f /opt/oxkat/tools/ms_info.py
     test -f /opt/caesar/oxkat_scientific_config.py
     test -x /usr/bin/rclone
