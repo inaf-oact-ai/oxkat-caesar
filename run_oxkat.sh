@@ -260,6 +260,7 @@ fi
 # The input MS is used only for GET_INFO here; later stages that modify MS
 # data will require isolated writable snapshots/copies.
 # Keep per-run configuration separate from the shared, immutable repository.
+echo "INFO: Copying OXKAT configuration: $OXKAT_HOME/oxkat -> $JOB_DIR/oxkat"
 cp -a "$OXKAT_HOME/oxkat" "$JOB_DIR/oxkat"
 ln -s "$OXKAT_HOME/setups" "$JOB_DIR/setups"
 ln -s "$OXKAT_HOME/tools" "$JOB_DIR/tools"
@@ -287,6 +288,7 @@ if [[ "$STAGE" == "FLAG" || "$STAGE" == "2GC" ]]; then
 		exit 2
 	fi
 
+	echo "INFO: Copying project metadata: $PROJECT_INFO -> $JOB_DIR/project_info.json"
 	cp -- "$PROJECT_INFO" "$JOB_DIR/project_info.json"
 
 	# Validate the upstream metadata and obtain the target MS name.
@@ -331,7 +333,7 @@ print(name)
 PY
 	)
 
-	echo "INFO: FLAG target Measurement Set: $MS_NAME"
+	echo "INFO: $STAGE target Measurement Set: $MS_NAME"
 
 	# Upstream FLAG.py reads project_info.json and expects this
 	# basename in its current execution directory.
@@ -379,6 +381,7 @@ else
 	ln -s "$INPUT_MS" "$JOB_DIR/$MS_NAME"
 
 	if [[ "$STAGE" == "1GC" ]]; then
+		echo "INFO: Copying project metadata: $PROJECT_INFO -> $JOB_DIR/project_info.json"
 		cp -- "$PROJECT_INFO" "$JOB_DIR/project_info.json"
 
 		/usr/bin/python3 - "$JOB_DIR/project_info.json" "$MS_NAME" <<'PY'
@@ -637,10 +640,12 @@ copy_outputs() {
 	esac
 
 	if [[ -f "$JOB_DIR/$SCRIPT_NAME" ]]; then
+		echo "INFO: Copying execution script: $JOB_DIR/$SCRIPT_NAME -> $OUT_DIR/"
 		cp -f "$JOB_DIR/$SCRIPT_NAME" "$OUT_DIR/"
 	fi	
 
 	if [[ -f "$JOB_DIR/oxkat_config_overrides.json" ]]; then
+		echo "INFO: Copying scientific configuration overrides -> $OUT_DIR/"
 		cp -f \
 			"$JOB_DIR/oxkat_config_overrides.json" \
 			"$OUT_DIR/oxkat_config_overrides.json"
@@ -650,6 +655,8 @@ copy_outputs() {
 		if [[ ! -f "$logfile" ]]; then
 			continue
 		fi
+		
+		echo "INFO: Copying execution log: $logfile -> $OUT_DIR/"
 		cp -f "$logfile" "$OUT_DIR/"
 	done
 }
@@ -727,6 +734,7 @@ PY
 			return 1
 		fi
 
+		echo "INFO: Publishing 1GC Measurement Set: $ms_path -> $OUT_DIR/$name"
 		mv -- "$ms_path" "$OUT_DIR/$name"
 	done
 
@@ -734,11 +742,13 @@ PY
 	for ms_path in "$JOB_DIR"/*.ms.flagversions; do
 		[[ -e "$ms_path" ]] || continue
 		[[ -d "$ms_path" && ! -L "$ms_path" ]] || return 1
+		echo "INFO: Publishing 1GC flag histories: $ms_path -> $OUT_DIR/"
 		mv -- "$ms_path" "$OUT_DIR/"
 	done
 
 	for name in GAINTABLES GAINPLOTS VISPLOTS; do
 		if [[ -d "$JOB_DIR/$name" && ! -L "$JOB_DIR/$name" ]]; then
+			echo "INFO: Publishing 1GC $name product: $JOB_DIR/$name -> $OUT_DIR/"
 			mv -- "$JOB_DIR/$name" "$OUT_DIR/"
 		fi
 	done
@@ -854,13 +864,16 @@ publish_flag_products() {
 	fi
 
 	# Publish actual directories, never the MS symlink.
+	echo "INFO: Publishing FLAG Measurement Set: $source_ms -> $published_ms"
 	mv -T -- "$source_ms" "$published_ms"
 
 	rm -- "$JOB_DIR/$MS_NAME"
 
+	echo "INFO: Publishing FLAG images: $JOB_DIR/IMAGES -> $OUT_DIR/IMAGES"
 	mv -T -- "$JOB_DIR/IMAGES" "$OUT_DIR/IMAGES"
 
 	if [[ -n "$source_flags" ]]; then
+		echo "INFO: Publishing FLAG flag histories: $source_flags -> $published_flags"
 		mv -T -- "$source_flags" "$published_flags"
 	fi
 
@@ -1001,15 +1014,19 @@ publish_2gc_products() {
 	fi
 
 	# Publish actual private directories, never symlinks.
+	echo "INFO: Publishing 2GC Measurement Set: $source_ms -> $published_ms"
 	mv -T -- "$source_ms" "$published_ms"
 	rm -- "$workspace_ms"
 
+	echo "INFO: Publishing 2GC images: $source_images -> $published_images"
 	mv -T -- "$source_images" "$published_images"
 	rm -- "$workspace_images"
 
+	echo "INFO: Publishing 2GC gain tables: $JOB_DIR/GAINTABLES -> $OUT_DIR/GAINTABLES"
 	mv -T -- "$JOB_DIR/GAINTABLES" "$OUT_DIR/GAINTABLES"
 
 	if [[ -n "$source_flags" ]]; then
+		echo "INFO: Publishing 2GC flag histories: $source_flags -> $published_flags"
 		mv -T -- "$source_flags" "$published_flags"
 	fi
 
@@ -1082,6 +1099,7 @@ if [[ "$STAGE" == "1GC" ]]; then
 
 	# Preserve the upstream observation metadata.
 	if [[ "$OUT_DIR" != "$JOB_DIR" ]]; then
+		echo "INFO: Publishing project metadata: $JOB_DIR/project_info.json -> $OUT_DIR/project_info.json"
 		cp "$JOB_DIR/project_info.json" "$OUT_DIR/project_info.json"
 	fi
 
@@ -1134,6 +1152,7 @@ if [[ "$STAGE" == "FLAG" ]]; then
 	fi
 
 	if [[ "$OUT_DIR" != "$JOB_DIR" ]]; then
+		echo "INFO: Publishing project metadata: $JOB_DIR/project_info.json -> $OUT_DIR/project_info.json"
 		cp -- "$JOB_DIR/project_info.json" \
 			"$OUT_DIR/project_info.json"
 	fi
@@ -1188,6 +1207,7 @@ if [[ "$STAGE" == "2GC" ]]; then
 	fi
 
 	if [[ "$OUT_DIR" != "$JOB_DIR" ]]; then
+		echo "INFO: Publishing project metadata: $JOB_DIR/project_info.json -> $OUT_DIR/project_info.json"
 		cp -- "$JOB_DIR/project_info.json" \
 			"$OUT_DIR/project_info.json"
 	fi
@@ -1247,6 +1267,7 @@ PY
 
 	# Avoid copying a file onto itself when OUT_DIR is the workspace.
 	if [[ "$OUT_DIR" != "$JOB_DIR" ]]; then
+		echo "INFO: Publishing project metadata: $JOB_DIR/project_info.json -> $OUT_DIR/project_info.json"
 		cp "$JOB_DIR/project_info.json" "$OUT_DIR/project_info.json"
 	fi
 
