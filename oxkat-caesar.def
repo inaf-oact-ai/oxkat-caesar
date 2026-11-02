@@ -16,6 +16,7 @@ From: oxkat-0.41.sif
     run_oxkat.sh /opt/caesar/run_oxkat.sh
     oxkat_scientific_config.py /opt/caesar/oxkat_scientific_config.py
     oxkat_target_info.py /opt/caesar/oxkat_target_info.py
+    oxkat_ms_identity.py /opt/caesar/oxkat_ms_identity.py
 
 %post
     set -eu
@@ -90,6 +91,7 @@ From: oxkat-0.41.sif
     test -f /opt/oxkat/tools/ms_info.py
     test -f /opt/caesar/oxkat_scientific_config.py
     test -f /opt/caesar/oxkat_target_info.py
+    test -f /opt/caesar/oxkat_ms_identity.py
     test -x /usr/bin/rclone
 
     PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
@@ -97,6 +99,14 @@ import sys
 sys.path.insert(0, "/opt/caesar")
 from oxkat_target_info import select_target, TargetInfoError
 print("OXKAT target metadata helper OK")
+'
+
+    PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
+import sys
+sys.path.insert(0, "/opt/caesar")
+from oxkat_ms_identity import verify, MSIdentityError
+from pyrap.tables import table
+print("OXKAT MS identity checker OK")
 '
 
     /usr/bin/python3 -c 'import numpy, astropy'

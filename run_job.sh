@@ -200,6 +200,7 @@ HAS_MS=false
 HAS_PROJECT_INFO=false
 HAS_FLAG_IMAGES=false
 OXKAT_STAGE=""
+TARGET_VALUE=""
 
 for arg in "${OXKAT_ARGS[@]}"; do
 	case "$arg" in
@@ -248,6 +249,15 @@ for arg in "${OXKAT_ARGS[@]}"; do
 			fi
 		;;
 		
+		--target-name=*)
+			TARGET_VALUE="${arg#*=}"
+
+			if [[ ! "$TARGET_VALUE" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]]; then
+				echo 'ERROR: Invalid OXKAT target name' >&2
+				exit 2
+			fi
+		;;		
+		
 		--oxkat-home=/*)
 			# - Optional override of the oxkat source directory
 		;;
@@ -260,6 +270,13 @@ done
 
 if [ "$HAS_STAGE" != true ] || [ "$HAS_MS" != true ]; then
 	echo 'ERROR: oxkat requires --stage and --input-ms' >&2
+	exit 2
+fi
+
+if [[ -n "${TARGET_VALUE:-}" && \
+      "$OXKAT_STAGE" != "FLAG" && \
+      "$OXKAT_STAGE" != "2GC" ]]; then
+	echo 'ERROR: --target-name requires FLAG or 2GC' >&2
 	exit 2
 fi
 

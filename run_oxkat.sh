@@ -396,6 +396,15 @@ PY
 	
 	echo "INFO: $STAGE target Measurement Set: $MS_NAME"
 
+	if [[ -n "$TARGET_NAME" ]]; then
+		echo "INFO: Verifying staged MS FIELD table for target: $TARGET_NAME"
+
+		/usr/bin/python3 /opt/caesar/oxkat_ms_identity.py \
+			--ms "$INPUT_MS" \
+			--project-info "$JOB_DIR/project_info.json" \
+			--target "$TARGET_NAME"
+	fi
+
 	# Upstream FLAG.py reads project_info.json and expects this
 	# basename in its current execution directory.
 	# The link targets only the private staged copy.
