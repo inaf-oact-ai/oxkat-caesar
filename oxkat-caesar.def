@@ -15,6 +15,7 @@ From: oxkat-0.41.sif
     run_job.sh /opt/caesar/run_job.sh
     run_oxkat.sh /opt/caesar/run_oxkat.sh
     oxkat_scientific_config.py /opt/caesar/oxkat_scientific_config.py
+    oxkat_target_info.py /opt/caesar/oxkat_target_info.py
 
 %post
     set -eu
@@ -88,7 +89,15 @@ From: oxkat-0.41.sif
     test -f /opt/oxkat/setups/2GC.py
     test -f /opt/oxkat/tools/ms_info.py
     test -f /opt/caesar/oxkat_scientific_config.py
+    test -f /opt/caesar/oxkat_target_info.py
     test -x /usr/bin/rclone
+
+    PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
+import sys
+sys.path.insert(0, "/opt/caesar")
+from oxkat_target_info import select_target, TargetInfoError
+print("OXKAT target metadata helper OK")
+'
 
     /usr/bin/python3 -c 'import numpy, astropy'
 

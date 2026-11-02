@@ -54,6 +54,7 @@ Options:
   --input-ms=PATH      Original MS for GET_INFO/1GC; private target MS for FLAG/2GC.
   --project-info=PATH  Retained project_info.json; required for 1GC/FLAG/2GC.
   --flag-images=PATH   Private staged FLAG image directory; required for 2GC.
+  --target-name=NAME   Select the science target for FLAG or 2GC.
   --outdir=DIR         Directory for published scientific outputs.
   --oxkat-home=DIR     OXKAT checkout (default: /opt/oxkat).
   --run                Execute the generated scientific script.
@@ -75,6 +76,7 @@ PROJECT_INFO=""
 FLAG_IMAGES=""
 OUT_DIR=""
 OXKAT_CONFIG_TOKEN=""
+TARGET_NAME=""
 OXKAT_HOME="${OXKAT_HOME:-/opt/oxkat}"
 RUN=false
 
@@ -106,6 +108,10 @@ for arg in "$@"; do
 				
 		--oxkat-config=*)
 			OXKAT_CONFIG_TOKEN="${arg#*=}"
+		;;
+
+		--target-name=*)
+			TARGET_NAME="${arg#*=}"
 		;;
 
 		--outdir=*)
@@ -153,6 +159,23 @@ if [[ "$STAGE" != "GET_INFO" && \
       "$STAGE" != "2GC" ]]; then
 	echo 'ERROR: Unsupported oxkat stage.' >&2
 	exit 2
+fi
+
+if [[ -n "$TARGET_NAME" ]]; then
+	if [[ "$STAGE" != "FLAG" && "$STAGE" != "2GC" ]]; then
+		echo 'ERROR: --target-name is supported only for FLAG and 2GC.' >&2
+		exit 2
+	fi
+
+	if [[ ! "$TARGET_NAME" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$ ]]; then
+		echo 'ERROR: Invalid OXKAT target name.' >&2
+		exit 2
+	fi
+
+	if [[ ! -f /opt/caesar/oxkat_target_info.py ]]; then
+		echo 'ERROR: Missing OXKAT target metadata helper.' >&2
+		exit 2
+	fi
 fi
 
 if [[ "$STAGE" == "1GC" || "$STAGE" == "FLAG" || "$STAGE" == "2GC" ]]; then
@@ -289,20 +312,56 @@ if [[ "$STAGE" == "FLAG" || "$STAGE" == "2GC" ]]; then
 	fi
 
 	echo "INFO: Copying project metadata: $PROJECT_INFO -> $JOB_DIR/project_info.json"
-	cp -- "$PROJECT_INFO" "$JOB_DIR/project_info.json"
+	
+	if [[ -n "$TARGET_NAME" ]]; then
+		echo "INFO: Selecting OXKAT target: $TARGET_NAME"
 
-	# Validate the upstream metadata and obtain the target MS name.
-	# Initial FLAG implementation deliberately supports one target.
-	MS_NAME=$(/usr/bin/python3 - "$JOB_DIR/project_info.json" <<'PY'
+		# Derive the target-specific metadata from the trusted staged
+		# project_info input. Never modify the retained source.
+		EXPECTED_MS=$(
+			/usr/bin/python3 - "$PROJECT_INFO" "$TARGET_NAME" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding='utf-8') as stream:
+	info = json.load(stream)
+
+names = info.get('target_names')
+files = info.get('target_ms')
+
+if (
+	not isinstance(names, list)
+	or not isinstance(files, list)
+	or len(names) != len(files)
+	or names.count(sys.argv[2]) != 1
+):
+	raise SystemExit('Invalid OXKAT target selection')
+
+print(files[names.index(sys.argv[2])])
+PY
+		)
+
+		MS_NAME=$(
+			/usr/bin/python3 /opt/caesar/oxkat_target_info.py \
+				--source "$PROJECT_INFO" \
+				--output "$JOB_DIR/project_info.json" \
+				--target "$TARGET_NAME" \
+				--expected-ms "$EXPECTED_MS"
+		)
+
+	else
+		echo "INFO: Copying existing single-target project metadata: $PROJECT_INFO -> $JOB_DIR/project_info.json"
+		
+		cp -- "$PROJECT_INFO" "$JOB_DIR/project_info.json"
+
+		MS_NAME=$(
+			/usr/bin/python3 - "$JOB_DIR/project_info.json" <<'PY'
 import json
 import pathlib
 import sys
 
-with open(sys.argv[1]) as stream:
+with open(sys.argv[1], encoding='utf-8') as stream:
 	info = json.load(stream)
-
-if not isinstance(info, dict):
-	raise SystemExit('Invalid project_info.json')
 
 names = info.get('target_ms')
 ids = info.get('target_ids')
@@ -316,7 +375,9 @@ if (
 	or len(ids) != 1
 	or len(targets) != 1
 ):
-	raise SystemExit('FLAG currently requires exactly one target')
+	raise SystemExit(
+		'An explicit target is required for multi-target metadata'
+	)
 
 name = names[0]
 
@@ -324,15 +385,15 @@ if (
 	not isinstance(name, str)
 	or pathlib.PurePosixPath(name).name != name
 	or not name.endswith('.ms')
-	or name in ('.', '..')
 	or not info.get('band')
 ):
-	raise SystemExit('Invalid FLAG target metadata')
+	raise SystemExit('Invalid single-target project metadata')
 
 print(name)
 PY
-	)
-
+		)
+	fi	
+	
 	echo "INFO: $STAGE target Measurement Set: $MS_NAME"
 
 	# Upstream FLAG.py reads project_info.json and expects this
