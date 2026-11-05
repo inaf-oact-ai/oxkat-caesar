@@ -122,6 +122,23 @@ for path, replacements in patches.items():
         new = new[:-1] + "))"
         source = source.replace(old, new)
 
+    if path.name == "source_finder.py":
+        flag_replacements = {
+            'src_flags |= model[prefix + "flags"].value':
+                'src_flags |= int(model[prefix + "flags"].value)',
+            'params[prefix + "flags"].value |= flags.NOTFIT':
+                'params[prefix + "flags"].value = int(params[prefix + "flags"].value) | flags.NOTFIT',
+        }
+
+        for old, new in flag_replacements.items():
+            count = source.count(old)
+            if count != 1:
+                raise RuntimeError(
+                    f"Unexpected source_finder.py flag expression: "
+                    f"{old} found {count} times, expected 1"
+                )
+            source = source.replace(old, new)
+
     compile(source, str(path), "exec")
     path.write_text(source, encoding="utf-8")
     print(f"AegeanTools compatibility fix applied: {path.name}")
