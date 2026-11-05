@@ -67,11 +67,54 @@ From: oxkat-0.41.sif
     # Keep the upstream oxkat Python files read-only in the image.
     # run_oxkat.sh copies oxkat/ to a job-specific writable workspace.
     chmod -R a+rX /opt/oxkat
+    
+    # ----------------------------------------------------------
+    # Install BANE/Aegean in an isolated Python environment.
+    # Preserve the scientific Python environment of the base image.
+    # ----------------------------------------------------------
+
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        --no-install-recommends python3-venv python3-pip
+
+    rm -rf /var/lib/apt/lists/*
+
+    /usr/bin/python3 -m venv /opt/aegean-venv
+
+    /opt/aegean-venv/bin/python -m pip install \
+        --no-cache-dir --upgrade \
+        "pip<26"
+
+    PYTHON_MINOR=$(/usr/bin/python3 -c \
+        'import sys; print(sys.version_info.minor)')
+
+    if [ "$PYTHON_MINOR" -lt 10 ]; then
+        AEGEAN_VERSION="2.3.0"
+    else
+        AEGEAN_VERSION="2.3.5"
+    fi
+
+    echo "INFO: Installing AegeanTools ${AEGEAN_VERSION}"
+
+    /opt/aegean-venv/bin/python -m pip install \
+        --no-cache-dir \
+        --prefer-binary \
+        "numpy<2" \
+        "AegeanTools==${AEGEAN_VERSION}"
+
+    /opt/aegean-venv/bin/python -m pip check
+
+    test -x /opt/aegean-venv/bin/BANE
+    test -x /opt/aegean-venv/bin/aegean
+
+    echo "INFO: BANE/Aegean installation completed."
+
 
 %environment
     export OXKAT_HOME=/opt/oxkat
     export OXKAT_RUNNER_PATH=/opt/caesar/run_oxkat.sh
     export PATH=/opt/caesar:$PATH
+    export PATH=$PATH:/opt/aegean-venv/bin
     export PYTHONDONTWRITEBYTECODE=1
 
 %runscript
@@ -113,6 +156,31 @@ print("OXKAT MS identity checker OK")
 '
 
     /usr/bin/python3 -c 'import numpy, astropy'
+    
+# Verify the isolated AegeanTools environment.
+
+    /opt/aegean-venv/bin/python -m pip check
+
+    PYTHONDONTWRITEBYTECODE=1 \
+        /opt/aegean-venv/bin/python -c '
+import numpy
+import scipy
+import astropy
+import healpy
+import sklearn
+import lmfit
+import AegeanTools
+
+print("AegeanTools dependencies imported successfully")
+'
+
+    /opt/aegean-venv/bin/BANE --help \
+        > /dev/null
+
+    /opt/aegean-venv/bin/aegean --help \
+        > /dev/null
+
+    echo "INFO: BANE and Aegean smoke tests passed."    
     
     PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - <<'PY'
 import ast

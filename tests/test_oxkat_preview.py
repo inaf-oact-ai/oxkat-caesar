@@ -26,12 +26,12 @@ def test_generates_small_previews_and_statistics(tmp_path):
 	data[90, 220] = -3
 	make_image(images, 'test-MFS-image.fits', data)
 	result = generate(images, out)
-	assert result['schema'] == 'caesar.oxkat-image-previews.v1'
+	assert result['schema'] == 'caesar.oxkat-image-previews.v2'
 	assert not result['errors']
 	assert len(result['products']) == 1
 	product = result['products'][0]
 	assert product['image']['width'] == 512
-	assert len(product['previews']) == 3
+	assert len(product['previews']) == 5
 	assert product['statistics']['max_sample'] == 15.0
 	for item in product['previews']:
 		p = out / item['file']
@@ -103,3 +103,73 @@ def test_filename_provenance_and_priority(tmp_path):
 	assert first['source_name'] == name
 	assert first['previews'][0]['file'] == 'preview_%s__overview.png' % name[:-5]
 	assert (out / first['previews'][0]['file']).is_file()
+
+
+def test_positive_and_negative_peak_crops(tmp_path):
+	images = tmp_path / 'IMAGES'
+	images.mkdir()
+	out = tmp_path / 'results'
+	out.mkdir()
+	data = np.zeros((512, 512), dtype=np.float32)
+	data[80, 60] = 12
+	data[400, 430] = -18
+	make_image(images, 'science-MFS-image.fits', data)
+	result = generate(images, out)
+	assert result['schema'] == 'caesar.oxkat-image-previews.v2'
+	previews = result['products'][0]['previews']
+	kinds = {p['kind'] for p in previews}
+	assert kinds == {'overview', 'center', 'peak_abs', 'peak_positive', 'peak_negative'}
+	assert all((out / p['file']).exists() for p in previews)
+	assert next(p for p in previews if p['kind'] == 'peak_negative')['file'].endswith('__peak_negative.png')
+
+
+def test_source_finding_is_opt_in_and_only_one_restored_mfs(tmp_path, monkeypatch):
+	import oxkat_preview
+	images = tmp_path / 'IMAGES'
+	images.mkdir()
+	out = tmp_path / 'results'
+	out.mkdir()
+	data = np.ones((128, 128), dtype=np.float32)
+	make_image(images, 'alpha-MFS-image.fits', data)
+	make_image(images, 'beta-MFS-image.fits', data)
+	make_image(images, 'gamma-MFS-residual.fits', data)
+	calls = []
+	def fake_source(path, output, identifier, **kwargs):
+		calls.append(path.name)
+		return {'status': 'complete', 'sources': {'component_count': 2}}
+	monkeypatch.setattr(oxkat_preview, '_source_finding', fake_source)
+	result = generate(images, out, source_finding=True)
+	assert len(calls) == 1
+	assert calls[0].endswith('-MFS-image.fits')
+	assert result['products'][0]['source_finding']['sources']['component_count'] == 2
+	assert 'source_finding' not in result['products'][1]
+
+
+def test_optional_source_finding_failure_does_not_fail_preview(tmp_path, monkeypatch):
+	import oxkat_preview
+	images = tmp_path / 'IMAGES'
+	images.mkdir()
+	out = tmp_path / 'results'
+	out.mkdir()
+	make_image(images, 'alpha-MFS-image.fits', np.ones((128, 128), dtype=np.float32))
+	def fail(*args, **kwargs):
+		raise RuntimeError('BANE unavailable')
+	monkeypatch.setattr(oxkat_preview, '_source_finding', fail)
+	result = generate(images, out, source_finding=True)
+	assert result['errors'] == []
+	assert result['products'][0]['source_finding']['status'] == 'unavailable'
+	assert (out / 'image_qa.json').exists()
+
+
+def test_flux_statistics_summary(tmp_path):
+	from astropy.table import Table
+	from oxkat_preview import _catalog_summary
+	catalog = tmp_path / 'components.fits'
+	Table({'peak_flux': [1.0, 2.0, 4.0], 'int_flux': [1.2, 2.6, 5.0],
+		'island': [1, 1, 2], 'ra': [100., 101., 102.],
+		'dec': [-30., -31., -32.], 'local_rms': [0.1, 0.1, 0.2]}).write(catalog)
+	result = _catalog_summary(catalog)
+	assert result['component_count'] == 3
+	assert result['island_count'] == 2
+	assert result['peak_flux']['median'] == 2.0
+	assert result['brightest_components'][0]['peak_flux'] == 4.0

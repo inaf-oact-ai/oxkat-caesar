@@ -11,6 +11,8 @@ import json
 import math
 import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 import struct
 import sys
@@ -19,12 +21,16 @@ import zlib
 
 import numpy as np
 from astropy.io import fits
+from astropy.table import Table
+from astropy.wcs import WCS
 
-SCHEMA = 'caesar.oxkat-image-previews.v1'
+SCHEMA = 'caesar.oxkat-image-previews.v2'
 MAX_FILES = 12
 MAX_EDGE = 1024
 MAX_CROP = 512
 MAX_PIXEL_SAMPLES = 1024 * 1024
+SOURCE_FINDING_TIMEOUT = 1200
+MAX_SOURCE_FINDING_IMAGES = 1
 
 
 def _png_gray(pixels):
@@ -206,6 +212,13 @@ def _generate_one(path, out):
 		peak_y, peak_x = np.unravel_index(int(np.argmax(values)), data.shape)
 		peak, bounds = _crop(data, int(peak_x), int(peak_y), MAX_CROP)
 		positions.append(('peak_abs', peak, bounds))
+		positive = np.where(np.isfinite(data), data, -np.inf)
+		negative = np.where(np.isfinite(data), data, np.inf)
+		for label, array, take_min in (('peak_positive', positive, False), ('peak_negative', negative, True)):
+			location = np.argmin(array) if take_min else np.argmax(array)
+			py, px = np.unravel_index(int(location), data.shape)
+			view, cbounds = _crop(data, int(px), int(py), MAX_CROP)
+			positions.append((label, view, cbounds))
 	previews = []
 	for kind, view, bounds in positions:
 		pixels, stretch = _render(view, mask=mask)
@@ -218,7 +231,127 @@ def _generate_one(path, out):
 		'previews': previews}
 
 
-def generate(images, output, *, max_files=MAX_FILES):
+def _map_preview(path, out, identifier, label):
+	"""Render BANE-produced FITS map without publishing its large FITS copy."""
+	data, meta = _read_plane(path)
+	stats = _stats(data)
+	pixels, stretch = _render(data)
+	filename = 'preview_%s__%s.png' % (identifier, label)
+	_atomic_new(out / filename, _png_gray(pixels))
+	return {'file': filename, 'image': meta, 'statistics': stats, 'stretch': stretch}
+
+
+def _catalog_summary(path, *, limit=10):
+	"""Summarize an Aegean FITS component table; no full catalog in JSON."""
+	components = Table.read(str(path), format='fits')
+	count = len(components)
+	cols = set(components.colnames)
+	def finite_column(name):
+		if name not in cols:
+			return np.array([], dtype=np.float64)
+		values = np.ma.filled(np.ma.asarray(components[name], dtype=np.float64), np.nan)
+		return np.asarray(values[np.isfinite(values)], dtype=np.float64)
+	peak = finite_column('peak_flux')
+	integrated = finite_column('int_flux')
+	result = {'component_count': int(count), 'island_count': None,
+		'flux_unit_peak': 'Jy/beam', 'flux_unit_integrated': 'Jy',
+		'peak_flux': _distribution(peak), 'integrated_flux': _distribution(integrated)}
+	if 'island' in cols:
+		result['island_count'] = int(len(set(str(x) for x in components['island'])))
+	if count and peak.size and 'peak_flux' in cols:
+		values = np.ma.filled(np.ma.asarray(components['peak_flux'], dtype=float), np.nan)
+		order = np.argsort(np.nan_to_num(values, nan=-np.inf))[::-1]
+		bright = []
+		for index in order[:limit]:
+			if not np.isfinite(values[index]):
+				continue
+			item = {'peak_flux': float(values[index])}
+			for key in ('ra', 'dec', 'int_flux', 'local_rms'):
+				if key in cols:
+					v = _number(components[key][index])
+					if v is not None:
+						item[key] = v
+			bright.append(item)
+		result['brightest_components'] = bright
+	return result
+
+
+def _distribution(values):
+	if not values.size:
+		return {'count': 0}
+	q = np.percentile(values, [0, 10, 25, 50, 75, 90, 100])
+	return {'count': int(values.size), 'min': float(q[0]), 'p10': float(q[1]),
+		'p25': float(q[2]), 'median': float(q[3]), 'p75': float(q[4]),
+		'p90': float(q[5]), 'max': float(q[6])}
+
+
+def _brightest_source_preview(path, sources, out, identifier):
+	"""Crop around the brightest detected Aegean source using FITS WCS."""
+	bright = sources.get('brightest_components') or []
+	if not bright or 'ra' not in bright[0] or 'dec' not in bright[0]:
+		return {'status': 'unavailable', 'reason': 'no sky coordinates in source catalog'}
+	with fits.open(str(path), memmap=True) as hdus:
+		header = next((hdu.header for hdu in hdus if hdu.data is not None and hdu.data.ndim >= 2), None)
+		if header is None:
+			return {'status': 'unavailable', 'reason': 'no image HDU'}
+		try:
+			x_full, y_full = WCS(header).celestial.world_to_pixel_values(
+				bright[0]['ra'], bright[0]['dec'])
+		except Exception as exc:
+			return {'status': 'unavailable', 'reason': 'cannot project source coordinates: %s' % type(exc).__name__}
+	data, meta = _read_plane(path)
+	step = meta['sample_step']
+	x, y = int(round(float(x_full) / step)), int(round(float(y_full) / step))
+	if not (0 <= x < data.shape[1] and 0 <= y < data.shape[0]):
+		return {'status': 'unavailable', 'reason': 'brightest catalog source outside sampled image'}
+	view, bounds = _crop(data, x, y, MAX_CROP)
+	pixels, stretch = _render(view)
+	filename = 'preview_%s__brightest_source.png' % identifier
+	_atomic_new(out / filename, _png_gray(pixels))
+	return {'status': 'complete', 'file': filename, 'sample_bounds': bounds,
+		'center_ra_deg': bright[0]['ra'], 'center_dec_deg': bright[0]['dec'],
+		'stretch': stretch}
+
+
+def _source_finding(path, output, identifier, *, scratch_dir=None, timeout=SOURCE_FINDING_TIMEOUT):
+	"""Run optional external BANE/Aegean on one restored MFS image.
+
+	Large temporary background/RMS FITS maps are never published. Returned
+	PNG previews and aggregate statistics can be retained as normal outputs.
+	"""
+	for executable in ('BANE', 'aegean'):
+		if shutil.which(executable) is None:
+			raise RuntimeError('%s executable not installed in scientific image' % executable)
+	with tempfile.TemporaryDirectory(prefix='oxkat-sourcefind-', dir=scratch_dir) as work:
+		workpath = Path(work)
+		prefix = workpath / 'bane'
+		background = workpath / 'bane_bkg.fits'
+		rms = workpath / 'bane_rms.fits'
+		catalog = workpath / 'aegean_components.fits'
+		def run(args):
+			completed = subprocess.run(args, cwd=work, stdin=subprocess.DEVNULL,
+				stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
+				check=False, text=True, errors='replace')
+			if completed.returncode:
+				raise RuntimeError('%s exited with %s: %s' %
+					(args[0], completed.returncode, completed.stdout[-300:]))
+		run(['BANE', str(path), '--out', str(prefix), '--cores', '1'])
+		if not background.is_file() or not rms.is_file():
+			raise RuntimeError('BANE did not produce background and RMS FITS maps')
+		result = {'status': 'complete', 'algorithm': 'BANE+AEGEAN',
+			'background': _map_preview(background, output, identifier, 'background'),
+			'rms': _map_preview(rms, output, identifier, 'rms')}
+		run(['aegean', str(path), '--background', str(background), '--noise', str(rms),
+			'--table', str(catalog), '--cores', '1', '--seedclip', '5', '--floodclip', '4'])
+		if not catalog.is_file():
+			raise RuntimeError('Aegean did not produce a FITS component catalog')
+		result['sources'] = _catalog_summary(catalog)
+		result['brightest_source_preview'] = _brightest_source_preview(
+			path, result['sources'], output, identifier)
+		return result
+
+
+def generate(images, output, *, max_files=MAX_FILES, source_finding=False, scratch_dir=None):
 	images = Path(images).absolute()
 	output = Path(output).absolute()
 	if output.is_symlink() or not output.is_dir():
@@ -233,9 +366,20 @@ def generate(images, output, *, max_files=MAX_FILES):
 		raise FileExistsError('image_qa.json already exists')
 	files = _source_files(images, max_files)
 	catalog = {'schema': SCHEMA, 'source_directory': 'IMAGES', 'products': [], 'errors': []}
+	source_finding_done = 0
 	for path in files:
 		try:
-			catalog['products'].append(_generate_one(path, output))
+			product = _generate_one(path, output)
+			catalog['products'].append(product)
+			if (source_finding and source_finding_done < MAX_SOURCE_FINDING_IMAGES
+					and product['product_kind'] == 'mfs_restored_image'):
+				source_finding_done += 1
+				try:
+					product['source_finding'] = _source_finding(path, output,
+						product['product_id'], scratch_dir=scratch_dir)
+				except Exception as exc:
+					product['source_finding'] = {'status': 'unavailable',
+						'error': '%s: %s' % (type(exc).__name__, str(exc)[:250])}
 		except Exception as exc:
 			catalog['errors'].append({'source_name': path.name,
 				'error': '%s: %s' % (type(exc).__name__, str(exc)[:150])})
@@ -248,9 +392,14 @@ def main(argv=None):
 	parser.add_argument('--images', required=True, help='Existing IMAGES directory')
 	parser.add_argument('--outdir', required=True, help='Existing output directory')
 	parser.add_argument('--max-files', type=int, default=MAX_FILES)
+	parser.add_argument('--source-finding', action='store_true',
+		help='Run optional BANE/Aegean on one restored MFS image (may be slow)')
+	parser.add_argument('--scratch-dir',
+		help='Existing writable temporary filesystem with space for BANE FITS maps')
 	args = parser.parse_args(argv)
 	try:
-		result = generate(args.images, args.outdir, max_files=args.max_files)
+		result = generate(args.images, args.outdir, max_files=args.max_files,
+				source_finding=args.source_finding, scratch_dir=args.scratch_dir)
 	except Exception as exc:
 		print('ERROR: %s' % exc, file=sys.stderr)
 		return 2

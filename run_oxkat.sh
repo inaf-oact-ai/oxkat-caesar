@@ -649,7 +649,9 @@ generate_image_previews() {
 
 	if ! /usr/bin/python3 /opt/caesar/oxkat_preview.py \
 		--images "$OUT_DIR/IMAGES" \
-		--outdir "$OUT_DIR"; then
+		--outdir "$OUT_DIR" \
+		--source-finding; then
+				
 		echo 'WARNING: Preview generation failed or was incomplete.' >&2
 		echo 'WARNING: Scientific output remains valid.' >&2
 	fi
