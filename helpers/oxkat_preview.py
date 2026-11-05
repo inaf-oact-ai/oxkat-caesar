@@ -9,6 +9,9 @@ import argparse
 import hashlib
 import json
 import math
+import datetime
+import signal
+import time
 import os
 import re
 import shutil
@@ -31,6 +34,12 @@ MAX_CROP = 512
 MAX_PIXEL_SAMPLES = 1024 * 1024
 SOURCE_FINDING_TIMEOUT = 1200
 MAX_SOURCE_FINDING_IMAGES = 1
+SOURCE_FINDING_HEARTBEAT = 20
+
+
+def _progress(message):
+	stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+	print('[OXKAT preview %s] %s' % (stamp, message), file=sys.stderr, flush=True)
 
 
 def _png_gray(pixels):
@@ -313,12 +322,60 @@ def _brightest_source_preview(path, sources, out, identifier):
 		'stretch': stretch}
 
 
-def _source_finding(path, output, identifier, *, scratch_dir=None, timeout=SOURCE_FINDING_TIMEOUT):
-	"""Run optional external BANE/Aegean on one restored MFS image.
+def _run_scientific_tool(args, *, cwd, log_path, timeout, label):
+	"""Run a scientific subprocess with a durable log and progress heartbeat.
 
-	Large temporary background/RMS FITS maps are never published. Returned
-	PNG previews and aggregate statistics can be retained as normal outputs.
+	Do not buffer multi-minute BANE/Aegean output in Python memory.
+	A timeout terminates the process group, including its child processes.
 	"""
+	started = time.monotonic()
+	_progress('%s starting; detailed log: %s' % (label, log_path))
+	with open(log_path, 'x', encoding='utf-8') as stream:
+		stream.write('# OXKAT source finding: %s\n' % label)
+		stream.write('# UTC start: %s\n' % datetime.datetime.now(datetime.timezone.utc).isoformat())
+		stream.write('# Command: %s\n' % ' '.join(args))
+		stream.flush()
+		proc = subprocess.Popen(args, cwd=str(cwd), stdin=subprocess.DEVNULL,
+			stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+		try:
+			while True:
+				remaining = timeout - (time.monotonic() - started)
+				if remaining <= 0:
+					raise subprocess.TimeoutExpired(args, timeout)
+				try:
+					code = proc.wait(timeout=min(SOURCE_FINDING_HEARTBEAT, remaining))
+					break
+				except subprocess.TimeoutExpired:
+					_progress('%s still running (%.0f s); log: %s' % (
+						label, time.monotonic() - started, log_path))
+		except subprocess.TimeoutExpired:
+			_progress('%s timed out after %.0f s; stopping process group' % (
+				label, time.monotonic() - started))
+			try:
+				os.killpg(proc.pid, signal.SIGTERM)
+			except ProcessLookupError:
+				pass
+			try:
+				proc.wait(timeout=5)
+			except subprocess.TimeoutExpired:
+				try:
+					os.killpg(proc.pid, signal.SIGKILL)
+				except ProcessLookupError:
+					pass
+				proc.wait()
+			raise RuntimeError('%s timed out; see %s' % (label, log_path.name))
+		stream.write('\n# Exit status: %d\n' % code)
+		stream.flush()
+	elapsed = time.monotonic() - started
+	if code != 0:
+		_progress('%s FAILED (exit %d, %.1f s); see %s' % (label, code, elapsed, log_path))
+		raise RuntimeError('%s exited with %d; see %s' % (label, code, log_path.name))
+	_progress('%s completed successfully (%.1f s)' % (label, elapsed))
+	return elapsed
+
+
+def _source_finding(path, output, identifier, *, scratch_dir=None, timeout=SOURCE_FINDING_TIMEOUT):
+	"""Run BANE and Aegean with durable per-tool logs and progress updates."""
 	for executable in ('BANE', 'aegean'):
 		if shutil.which(executable) is None:
 			raise RuntimeError('%s executable not installed in scientific image' % executable)
@@ -328,26 +385,33 @@ def _source_finding(path, output, identifier, *, scratch_dir=None, timeout=SOURC
 		background = workpath / 'bane_bkg.fits'
 		rms = workpath / 'bane_rms.fits'
 		catalog = workpath / 'aegean_components.fits'
-		def run(args):
-			completed = subprocess.run(args, cwd=work, stdin=subprocess.DEVNULL,
-				stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
-				check=False, text=True, errors='replace')
-			if completed.returncode:
-				raise RuntimeError('%s exited with %s: %s' %
-					(args[0], completed.returncode, completed.stdout[-300:]))
-		run(['BANE', str(path), '--out', str(prefix), '--cores', '1'])
+		log_bane = output / ('sourcefind_%s__BANE.log' % identifier)
+		log_aegean = output / ('sourcefind_%s__aegean.log' % identifier)
+		_progress('Source finding selected %s' % path.name)
+		bane_seconds = _run_scientific_tool(
+			['BANE', str(path), '--out', str(prefix), '--cores', '1'],
+			cwd=workpath, log_path=log_bane, timeout=timeout, label='BANE')
 		if not background.is_file() or not rms.is_file():
-			raise RuntimeError('BANE did not produce background and RMS FITS maps')
+			raise RuntimeError('BANE finished without expected background/RMS FITS maps; see %s' % log_bane.name)
+		_progress('BANE maps ready; rendering background and RMS PNGs')
 		result = {'status': 'complete', 'algorithm': 'BANE+AEGEAN',
+			'logs': {'bane': log_bane.name, 'aegean': log_aegean.name},
+			'duration_seconds': {'bane': round(bane_seconds, 2)},
 			'background': _map_preview(background, output, identifier, 'background'),
 			'rms': _map_preview(rms, output, identifier, 'rms')}
-		run(['aegean', str(path), '--background', str(background), '--noise', str(rms),
-			'--table', str(catalog), '--cores', '1', '--seedclip', '5', '--floodclip', '4'])
+		_progress('BANE maps rendered; starting Aegean detection')
+		aegean_seconds = _run_scientific_tool(
+			['aegean', str(path), '--background', str(background), '--noise', str(rms),
+			'--table', str(catalog), '--cores', '1', '--seedclip', '5', '--floodclip', '4'],
+			cwd=workpath, log_path=log_aegean, timeout=timeout, label='Aegean')
 		if not catalog.is_file():
-			raise RuntimeError('Aegean did not produce a FITS component catalog')
+			raise RuntimeError('Aegean finished without FITS component catalog; see %s' % log_aegean.name)
+		result['duration_seconds']['aegean'] = round(aegean_seconds, 2)
 		result['sources'] = _catalog_summary(catalog)
 		result['brightest_source_preview'] = _brightest_source_preview(
 			path, result['sources'], output, identifier)
+		_progress('Aegean catalog summarized: %d components, %s islands' % (
+			result['sources']['component_count'], result['sources']['island_count']))
 		return result
 
 
@@ -365,9 +429,11 @@ def generate(images, output, *, max_files=MAX_FILES, source_finding=False, scrat
 	if (output / 'image_qa.json').exists() or (output / 'image_qa.json').is_symlink():
 		raise FileExistsError('image_qa.json already exists')
 	files = _source_files(images, max_files)
+	_progress('Found %d selected FITS products; source finding: %s' % (len(files), 'enabled' if source_finding else 'disabled'))
 	catalog = {'schema': SCHEMA, 'source_directory': 'IMAGES', 'products': [], 'errors': []}
 	source_finding_done = 0
-	for path in files:
+	for index, path in enumerate(files, 1):
+		_progress('Previewing FITS %d/%d: %s' % (index, len(files), path.name))
 		try:
 			product = _generate_one(path, output)
 			catalog['products'].append(product)
@@ -378,11 +444,21 @@ def generate(images, output, *, max_files=MAX_FILES, source_finding=False, scrat
 					product['source_finding'] = _source_finding(path, output,
 						product['product_id'], scratch_dir=scratch_dir)
 				except Exception as exc:
+					_progress('Source finding UNAVAILABLE for %s: %s: %s' % (path.name, type(exc).__name__, exc))
 					product['source_finding'] = {'status': 'unavailable',
 						'error': '%s: %s' % (type(exc).__name__, str(exc)[:250])}
 		except Exception as exc:
+			_progress('Preview generation FAILED for %s: %s: %s' % (path.name, type(exc).__name__, exc))
 			catalog['errors'].append({'source_name': path.name,
 				'error': '%s: %s' % (type(exc).__name__, str(exc)[:150])})
+	if source_finding and source_finding_done == 0:
+		_progress('Source finding NOT ATTEMPTED: no successfully previewed restored MFS image selected')
+	catalog['source_finding_summary'] = {
+		'requested': bool(source_finding),
+		'attempted': source_finding_done,
+		'completed': sum(p.get('source_finding', {}).get('status') == 'complete' for p in catalog['products']),
+		'unavailable': sum(p.get('source_finding', {}).get('status') == 'unavailable' for p in catalog['products'])
+	}
 	_atomic_new(output / 'image_qa.json', (json.dumps(catalog, indent=2, allow_nan=False) + '\n').encode('utf-8'))
 	return catalog
 
@@ -403,8 +479,10 @@ def main(argv=None):
 	except Exception as exc:
 		print('ERROR: %s' % exc, file=sys.stderr)
 		return 2
-	print('OXKAT image previews: %d products, %d errors' %
-		(len(result['products']), len(result['errors'])))
+	sf = result['source_finding_summary']
+	print('OXKAT image previews: %d products, %d preview errors; source finding: requested=%s, attempted=%d, completed=%d, unavailable=%d' %
+		(len(result['products']), len(result['errors']), sf['requested'], sf['attempted'], sf['completed'], sf['unavailable']))
+	# An unavailable optional source finder does not invalidate an otherwise successful run.
 	return 0 if not result['errors'] else 1
 
 

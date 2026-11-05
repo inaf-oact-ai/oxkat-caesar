@@ -173,3 +173,47 @@ def test_flux_statistics_summary(tmp_path):
 	assert result['island_count'] == 2
 	assert result['peak_flux']['median'] == 2.0
 	assert result['brightest_components'][0]['peak_flux'] == 4.0
+
+
+def test_source_finding_failure_has_visible_progress_and_json_summary(tmp_path, monkeypatch, capsys):
+	import oxkat_preview
+	images = tmp_path / 'IMAGES'
+	images.mkdir()
+	out = tmp_path / 'results'
+	out.mkdir()
+	make_image(images, 'alpha-MFS-image.fits', np.ones((128, 128), dtype=np.float32))
+	def failed(*args, **kwargs):
+		raise RuntimeError('Aegean failed; see sourcefind_alpha-MFS-image__aegean.log')
+	monkeypatch.setattr(oxkat_preview, '_source_finding', failed)
+	result = generate(images, out, source_finding=True)
+	assert result['source_finding_summary'] == {
+		'requested': True, 'attempted': 1, 'completed': 0, 'unavailable': 1
+	}
+	assert 'Source finding UNAVAILABLE' in capsys.readouterr().err
+	assert json.loads((out / 'image_qa.json').read_text())['source_finding_summary']['unavailable'] == 1
+
+
+def test_scientific_subprocess_writes_durable_log(tmp_path, capsys):
+	import sys
+	from oxkat_preview import _run_scientific_tool
+	log = tmp_path / 'BANE.log'
+	elapsed = _run_scientific_tool(
+		[sys.executable, '-c', 'print("synthetic BANE output")'],
+		cwd=tmp_path, log_path=log, timeout=5, label='BANE')
+	assert elapsed >= 0
+	assert 'synthetic BANE output' in log.read_text()
+	assert 'Exit status: 0' in log.read_text()
+	assert 'BANE completed successfully' in capsys.readouterr().err
+
+
+def test_scientific_subprocess_failure_preserves_log(tmp_path, capsys):
+	import sys
+	from oxkat_preview import _run_scientific_tool
+	log = tmp_path / 'aegean.log'
+	with pytest.raises(RuntimeError, match='exited with 7'):
+		_run_scientific_tool(
+			[sys.executable, '-c', 'print("catalog failure"); raise SystemExit(7)'],
+			cwd=tmp_path, log_path=log, timeout=5, label='Aegean')
+	assert 'catalog failure' in log.read_text()
+	assert 'Exit status: 7' in log.read_text()
+	assert 'Aegean FAILED' in capsys.readouterr().err
