@@ -28,7 +28,9 @@ from astropy.table import Table
 from astropy.wcs import WCS
 
 SCHEMA = 'caesar.oxkat-image-previews.v2'
-MAX_FILES = 12
+# None means process every eligible FITS product.
+# An explicit limit remains available for diagnostic runs.
+MAX_FILES = None
 MAX_EDGE = 1024
 MAX_CROP = 512
 MAX_PIXEL_SAMPLES = 1024 * 1024
@@ -73,7 +75,7 @@ def _product_kind(name):
 	n = name.lower()
 	if n.endswith('.mask0.fits'):
 		return 'initial_cleaning_mask'
-	if n.endswith('.mask1.fits'):
+	if re.search(r'\.mask1(?:\.zoom[0-9]+)?\.fits$', n):
 		return 'refined_cleaning_mask'
 	if n.endswith('-mfs-image.pbcor.fits'):
 		return 'mfs_primary_beam_corrected_image'
@@ -107,6 +109,43 @@ _PRIORITY = {
 	'spectral_plane_or_other': 9,
 }
 
+# Preferred imaging families, in scientific processing order.
+# Unknown families remain eligible for previews and source finding.
+_FAMILY_PRIORITY = {
+	'pcalmask': 0,
+	'datamask': 1,
+	'datablind': 2
+}
+
+
+def _imaging_family(name):
+	"""Extract the WSClean/OXKAT imaging family from a FITS filename."""
+	match = re.search(
+		r'\.ms_([A-Za-z0-9_]+)-',
+		name,
+		flags=re.IGNORECASE
+	)
+	if match is None:
+		return 'unclassified'
+	return match.group(1).lower()
+
+
+def _family_sort_key(family):
+	"""Known families first; unknown families sorted deterministically."""
+	return (
+		_FAMILY_PRIORITY.get(family, len(_FAMILY_PRIORITY)),
+		family
+	)
+
+
+def _product_sort_key(path):
+	"""Order by imaging family, then image kind, then filename."""
+	family = _imaging_family(path.name)
+	return (
+		_family_sort_key(family),
+		_PRIORITY[_product_kind(path.name)],
+		path.name.lower()
+	)
 
 def _preview_identifier(source_name):
 	"""Prefer the intact FITS stem; hash only on pathological long names."""
@@ -119,18 +158,32 @@ def _preview_identifier(source_name):
 	return stem
 
 
-def _source_files(images, limit):
+def _source_files(images, limit=None):
+	"""Discover FITS products across all imaging families."""
 	if images.is_symlink() or not images.is_dir():
 		raise ValueError('IMAGES must be an ordinary directory')
+
 	files = []
+
 	for child in images.iterdir():
 		if child.suffix.lower() not in ('.fits', '.fit', '.fts'):
 			continue
-		if child.is_symlink() or not child.is_file():
-			raise ValueError('Unsafe FITS entry in IMAGES: %s' % child.name)
-		files.append(child)
-	return sorted(files, key=lambda p: (_PRIORITY[_product_kind(p.name)], p.name.lower()))[:limit]
 
+		if child.is_symlink() or not child.is_file():
+			raise ValueError(
+				'Unsafe FITS entry in IMAGES: %s' % child.name
+			)
+
+		files.append(child)
+
+	files.sort(key=_product_sort_key)
+
+	if limit is not None:
+		if limit < 1:
+			raise ValueError('max_files must be positive')
+		files = files[:limit]
+
+	return files
 
 def _read_plane(src):
 	"""Select first image HDU; select index zero on all non-spatial axes."""
@@ -572,53 +625,185 @@ def _source_finding(path, output, identifier, *, scratch_dir=None, timeout=SOURC
 		return result
 
 
-def generate(images, output, *, max_files=MAX_FILES, source_finding=False, scratch_dir=None):
+def generate(images, output, *, max_files=None, source_finding=False, scratch_dir=None):
+	"""Generate previews for all families; source-find the preferred restored MFS."""
 	images = Path(images).absolute()
 	output = Path(output).absolute()
+
 	if output.is_symlink() or not output.is_dir():
 		raise ValueError('Output must be an existing ordinary directory')
-	if images == output or output == images.parent or images in output.parents:
-		# Normal job path is results/IMAGES -> results; allowed (and intended).
-		if images == output or images in output.parents:
-			raise ValueError('Output must not be inside the scientific IMAGES directory')
-	if not 1 <= max_files <= MAX_FILES:
-		raise ValueError('max_files outside supported range')
+
+	if images == output or images in output.parents:
+		raise ValueError(
+			'Output must not be inside the scientific IMAGES directory'
+		)
+
+	if max_files is not None and max_files < 1:
+		raise ValueError('max_files must be positive')
+
 	if (output / 'image_qa.json').exists() or (output / 'image_qa.json').is_symlink():
 		raise FileExistsError('image_qa.json already exists')
+
 	files = _source_files(images, max_files)
-	_progress('Found %d selected FITS products; source finding: %s' % (len(files), 'enabled' if source_finding else 'disabled'))
-	catalog = {'schema': SCHEMA, 'source_directory': 'IMAGES', 'products': [], 'errors': []}
-	source_finding_done = 0
+
+	_progress(
+		'Found %d FITS products across imaging families; source finding: %s'
+		% (len(files), 'enabled' if source_finding else 'disabled')
+	)
+
+	catalog = {
+		'schema': SCHEMA,
+		'source_directory': 'IMAGES',
+		'products': [],
+		'errors': []
+	}
+
+	# Generate every requested image preview, regardless of family.
 	for index, path in enumerate(files, 1):
-		_progress('Previewing FITS %d/%d: %s' % (index, len(files), path.name))
+		family = _imaging_family(path.name)
+
+		_progress(
+			'Previewing FITS %d/%d [%s]: %s'
+			% (index, len(files), family, path.name)
+		)
+
 		try:
 			product = _generate_one(path, output)
+			product['imaging_family'] = family
 			catalog['products'].append(product)
-			if (source_finding and source_finding_done < MAX_SOURCE_FINDING_IMAGES
-					and product['product_kind'] == 'mfs_restored_image'):
-				source_finding_done += 1
-				try:
-					product['source_finding'] = _source_finding(path, output,
-						product['product_id'], scratch_dir=scratch_dir)
-				except Exception as exc:
-					_progress('Source finding UNAVAILABLE for %s: %s: %s' % (path.name, type(exc).__name__, exc))
-					product['source_finding'] = {'status': 'unavailable',
-						'error': '%s: %s' % (type(exc).__name__, str(exc)[:250])}
+
 		except Exception as exc:
-			_progress('Preview generation FAILED for %s: %s: %s' % (path.name, type(exc).__name__, exc))
-			catalog['errors'].append({'source_name': path.name,
-				'error': '%s: %s' % (type(exc).__name__, str(exc)[:150])})
-	if source_finding and source_finding_done == 0:
-		_progress('Source finding NOT ATTEMPTED: no successfully previewed restored MFS image selected')
+			_progress(
+				'Preview generation FAILED for %s: %s: %s'
+				% (path.name, type(exc).__name__, exc)
+			)
+
+			catalog['errors'].append({
+				'source_name': path.name,
+				'imaging_family': family,
+				'error': '%s: %s' % (
+					type(exc).__name__,
+					str(exc)[:150]
+				)
+			})
+
+	# Build a family index using successfully generated products.
+	family_index = {}
+
+	for product in catalog['products']:
+		family = product['imaging_family']
+
+		if family not in family_index:
+			family_index[family] = {
+				'name': family,
+				'product_count': 0,
+				'product_ids': []
+			}
+
+		family_index[family]['product_count'] += 1
+		family_index[family]['product_ids'].append(
+			product['product_id']
+		)
+
+	catalog['imaging_families'] = [
+		family_index[family]
+		for family in sorted(family_index, key=_family_sort_key)
+	]
+
+	# Select the highest-priority successfully previewed restored MFS.
+	# Files already follow the family and product priority ordering.
+	source_candidates = [
+		product
+		for product in catalog['products']
+		if product['product_kind'] == 'mfs_restored_image'
+	]
+
+	selected = source_candidates[0] if source_candidates else None
+
+	selected_family = (
+		selected['imaging_family'] if selected else None
+	)
+
+	selected_name = (
+		selected['source_name'] if selected else None
+	)
+
+	catalog['imaging_selection'] = {
+		'available_families': [
+			item['name']
+			for item in catalog['imaging_families']
+		],
+		'selected_family': selected_family,
+		'selection_reason': (
+			'preferred_available_restored_mfs'
+			if selected else 'no_restored_mfs_image'
+		),
+		'source_finding_input': selected_name
+	}
+
+	source_finding_done = 0
+
+	if source_finding:
+		if selected is None:
+			_progress(
+				'Source finding NOT ATTEMPTED: '
+				'no successfully previewed restored MFS image'
+			)
+		else:
+			source_finding_done = 1
+
+			_progress(
+				'Source finding family selected: %s; image: %s'
+				% (selected_family, selected_name)
+			)
+
+			try:
+				selected['source_finding'] = _source_finding(
+					images / selected_name,
+					output,
+					selected['product_id'],
+					scratch_dir=scratch_dir
+				)
+
+			except Exception as exc:
+				_progress(
+					'Source finding UNAVAILABLE for %s: %s: %s'
+					% (
+						selected_name,
+						type(exc).__name__,
+						exc
+					)
+				)
+
+				selected['source_finding'] = {
+					'status': 'unavailable',
+					'error': '%s: %s' % (
+						type(exc).__name__,
+						str(exc)[:250]
+					)
+				}
+
 	catalog['source_finding_summary'] = {
 		'requested': bool(source_finding),
 		'attempted': source_finding_done,
-		'completed': sum(p.get('source_finding', {}).get('status') == 'complete' for p in catalog['products']),
-		'unavailable': sum(p.get('source_finding', {}).get('status') == 'unavailable' for p in catalog['products'])
+		'completed': sum(
+			product.get('source_finding', {}).get('status') == 'complete'
+			for product in catalog['products']
+		),
+		'unavailable': sum(
+			product.get('source_finding', {}).get('status') == 'unavailable'
+			for product in catalog['products']
+		)
 	}
-	_atomic_new(output / 'image_qa.json', (json.dumps(catalog, indent=2, allow_nan=False) + '\n').encode('utf-8'))
-	return catalog
 
+	_atomic_new(
+		output / 'image_qa.json',
+		(
+			json.dumps(catalog, indent=2, allow_nan=False) + '\n'
+		).encode('utf-8')
+	)
+
+	return catalog
 
 def main(argv=None):
 	parser = argparse.ArgumentParser(description=__doc__)
