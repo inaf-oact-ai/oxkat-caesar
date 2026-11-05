@@ -376,9 +376,11 @@ def _run_scientific_tool(args, *, cwd, log_path, timeout, label):
 
 def _source_finding(path, output, identifier, *, scratch_dir=None, timeout=SOURCE_FINDING_TIMEOUT):
 	"""Run BANE and Aegean with durable per-tool logs and progress updates."""
+	
 	for executable in ('BANE', 'aegean'):
 		if shutil.which(executable) is None:
 			raise RuntimeError('%s executable not installed in scientific image' % executable)
+	
 	with tempfile.TemporaryDirectory(prefix='oxkat-sourcefind-', dir=scratch_dir) as work:
 		workpath = Path(work)
 		prefix = workpath / 'bane'
@@ -387,31 +389,68 @@ def _source_finding(path, output, identifier, *, scratch_dir=None, timeout=SOURC
 		catalog = workpath / 'aegean_components.fits'
 		log_bane = output / ('sourcefind_%s__BANE.log' % identifier)
 		log_aegean = output / ('sourcefind_%s__aegean.log' % identifier)
+		
 		_progress('Source finding selected %s' % path.name)
+		
 		bane_seconds = _run_scientific_tool(
-			['BANE', str(path), '--out', str(prefix), '--cores', '1'],
-			cwd=workpath, log_path=log_bane, timeout=timeout, label='BANE')
+			[
+				'BANE', str(path), 
+				'--out', str(prefix), 
+				'--cores', '1'
+			],
+			cwd=workpath, 
+			log_path=log_bane, 
+			timeout=timeout, 
+			label='BANE'
+		)
+		
 		if not background.is_file() or not rms.is_file():
 			raise RuntimeError('BANE finished without expected background/RMS FITS maps; see %s' % log_bane.name)
+			
 		_progress('BANE maps ready; rendering background and RMS PNGs')
-		result = {'status': 'complete', 'algorithm': 'BANE+AEGEAN',
-			'logs': {'bane': log_bane.name, 'aegean': log_aegean.name},
-			'duration_seconds': {'bane': round(bane_seconds, 2)},
+		
+		result = {
+			'status': 'complete', 
+			'algorithm': 'BANE+AEGEAN',
+			'logs': {
+				'bane': log_bane.name, 
+				'aegean': log_aegean.name
+			},
+			'duration_seconds': {
+				'bane': round(bane_seconds, 2)
+			},
 			'background': _map_preview(background, output, identifier, 'background'),
-			'rms': _map_preview(rms, output, identifier, 'rms')}
+			'rms': _map_preview(rms, output, identifier, 'rms')
+		}
+		
 		_progress('BANE maps rendered; starting Aegean detection')
+
 		aegean_seconds = _run_scientific_tool(
-			['aegean', str(path), '--background', str(background), '--noise', str(rms),
-			'--table', str(catalog), '--cores', '1', '--seedclip', '5', '--floodclip', '4'],
-			cwd=workpath, log_path=log_aegean, timeout=timeout, label='Aegean')
+			[
+				'aegean', str(path),
+				'--background', str(background),
+				'--noise', str(rms),
+				'--table', str(catalog),
+				'--cores', '1',
+				'--slice', '0',
+				'--seedclip', '5',
+				'--floodclip', '4'
+			],
+			cwd=workpath,
+			log_path=log_aegean,
+			timeout=timeout,
+			label='Aegean'
+		)
+		
 		if not catalog.is_file():
 			raise RuntimeError('Aegean finished without FITS component catalog; see %s' % log_aegean.name)
+
 		result['duration_seconds']['aegean'] = round(aegean_seconds, 2)
 		result['sources'] = _catalog_summary(catalog)
-		result['brightest_source_preview'] = _brightest_source_preview(
-			path, result['sources'], output, identifier)
-		_progress('Aegean catalog summarized: %d components, %s islands' % (
-			result['sources']['component_count'], result['sources']['island_count']))
+		result['brightest_source_preview'] = _brightest_source_preview(path, result['sources'], output, identifier)
+
+		_progress('Aegean catalog summarized: %d components, %s islands' % (result['sources']['component_count'], result['sources']['island_count']))
+		
 		return result
 
 
