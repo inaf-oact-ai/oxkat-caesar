@@ -77,6 +77,7 @@ FLAG_IMAGES=""
 OUT_DIR=""
 OXKAT_CONFIG_TOKEN=""
 TARGET_NAME=""
+PREVIEW_RETENTION="selected"
 OXKAT_HOME="${OXKAT_HOME:-/opt/oxkat}"
 RUN=false
 
@@ -112,6 +113,10 @@ for arg in "$@"; do
 
 		--target-name=*)
 			TARGET_NAME="${arg#*=}"
+		;;
+				
+		--preview-retention=*)
+			PREVIEW_RETENTION="${arg#*=}"
 		;;
 
 		--outdir=*)
@@ -161,6 +166,7 @@ if [[ "$STAGE" != "GET_INFO" && \
 	exit 2
 fi
 
+# - Check target option
 if [[ -n "$TARGET_NAME" ]]; then
 	if [[ "$STAGE" != "FLAG" && "$STAGE" != "2GC" ]]; then
 		echo 'ERROR: --target-name is supported only for FLAG and 2GC.' >&2
@@ -178,6 +184,22 @@ if [[ -n "$TARGET_NAME" ]]; then
 	fi
 fi
 
+# - Check preview retention option
+if [[ "$PREVIEW_RETENTION" != "none" && \
+      "$PREVIEW_RETENTION" != "selected" && \
+      "$PREVIEW_RETENTION" != "all" ]]; then
+	echo "ERROR: Invalid preview retention profile: $PREVIEW_RETENTION" >&2
+	exit 2
+fi
+
+if [[ "$PREVIEW_RETENTION" != "selected" && \
+      "$STAGE" != "FLAG" && \
+      "$STAGE" != "2GC" ]]; then
+	echo 'ERROR: Preview retention overrides require FLAG or 2GC' >&2
+	exit 2
+fi
+
+# - Check project info option
 if [[ "$STAGE" == "1GC" || "$STAGE" == "FLAG" || "$STAGE" == "2GC" ]]; then
 	if [[ -z "$PROJECT_INFO" || ! -s "$PROJECT_INFO" ]]; then
 		echo "ERROR: $STAGE requires nonempty project_info.json" >&2
@@ -185,6 +207,7 @@ if [[ "$STAGE" == "1GC" || "$STAGE" == "FLAG" || "$STAGE" == "2GC" ]]; then
 	fi
 fi
 
+# - Check input MS option
 if [[ -z "$JOB_DIR" || -z "$INPUT_MS" ]]; then
 	usage >&2
 	exit 2
@@ -647,7 +670,7 @@ generate_image_previews() {
 
 	local preview_root="$OUT_DIR/previews"
 	local preview_all="$preview_root/all"
-	local retention_profile="${OXKAT_PREVIEW_RETENTION_PROFILE:-selected}"
+	local retention_profile="$PREVIEW_RETENTION"
 
 	case "$retention_profile" in
 		none|selected|all)

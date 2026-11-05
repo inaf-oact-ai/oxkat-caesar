@@ -201,6 +201,7 @@ HAS_PROJECT_INFO=false
 HAS_FLAG_IMAGES=false
 OXKAT_STAGE=""
 TARGET_VALUE=""
+PREVIEW_RETENTION="selected"
 
 for arg in "${OXKAT_ARGS[@]}"; do
 	case "$arg" in
@@ -258,6 +259,17 @@ for arg in "${OXKAT_ARGS[@]}"; do
 			fi
 		;;		
 		
+		--preview-retention=*)
+			PREVIEW_RETENTION="${arg#*=}"
+
+			if [[ "$PREVIEW_RETENTION" != "none" && \
+			      "$PREVIEW_RETENTION" != "selected" && \
+			      "$PREVIEW_RETENTION" != "all" ]]; then
+				echo 'ERROR: Invalid preview retention profile' >&2
+				exit 2
+			fi
+		;;
+
 		--oxkat-home=/*)
 			# - Optional override of the oxkat source directory
 		;;
@@ -268,11 +280,13 @@ for arg in "${OXKAT_ARGS[@]}"; do
 	esac
 done
 
+# - Check stage option
 if [ "$HAS_STAGE" != true ] || [ "$HAS_MS" != true ]; then
 	echo 'ERROR: oxkat requires --stage and --input-ms' >&2
 	exit 2
 fi
 
+# - Check target option
 if [[ -n "${TARGET_VALUE:-}" && \
       "$OXKAT_STAGE" != "FLAG" && \
       "$OXKAT_STAGE" != "2GC" ]]; then
@@ -280,7 +294,15 @@ if [[ -n "${TARGET_VALUE:-}" && \
 	exit 2
 fi
 
+# - Check preview retention option
+if [[ -n "${PREVIEW_RETENTION:-}" && \
+      "$OXKAT_STAGE" != "FLAG" && \
+      "$OXKAT_STAGE" != "2GC" ]]; then
+	echo 'ERROR: --preview-retention requires FLAG or 2GC' >&2
+	exit 2
+fi
 
+# - Check project info option
 if [[ "$OXKAT_STAGE" == "1GC" || \
       "$OXKAT_STAGE" == "FLAG" || \
       "$OXKAT_STAGE" == "2GC" ]]; then
@@ -291,6 +313,7 @@ if [[ "$OXKAT_STAGE" == "1GC" || \
 	fi
 fi
 
+# - Check flag image option
 if [[ "$OXKAT_STAGE" == "2GC" ]]; then
 	if [ "$HAS_FLAG_IMAGES" != true ]; then
 		echo 'ERROR: 2GC requires --flag-images' >&2
