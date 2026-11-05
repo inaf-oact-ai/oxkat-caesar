@@ -627,6 +627,36 @@ if record_path.is_file():
 	print('INFO: OXKAT scientific configuration verified.')
 PY
 
+
+# -----------------------------------------------------------------------------
+# Generate image previews
+# -----------------------------------------------------------------------------
+generate_image_previews() {
+	if [[ "$RUN" != true || "$STATUS" != completed ]]; then
+		return 0
+	fi
+
+	if [[ "$STAGE" != "FLAG" && "$STAGE" != "2GC" ]]; then
+		return 0
+	fi
+
+	if [[ ! -d "$OUT_DIR/IMAGES" ]]; then
+		echo 'WARNING: No published IMAGES directory for previews.' >&2
+		return 0
+	fi
+
+	echo "INFO: Generating OXKAT $STAGE image previews..."
+
+	if ! /usr/bin/python3 /opt/caesar/oxkat_preview.py \
+		--images "$OUT_DIR/IMAGES" \
+		--outdir "$OUT_DIR"; then
+		echo 'WARNING: Preview generation failed or was incomplete.' >&2
+		echo 'WARNING: Scientific output remains valid.' >&2
+	fi
+
+	return 0
+}
+
 # -----------------------------------------------------------------------------
 # Serialize a public, portable CAESAR-REST result manifest
 # -----------------------------------------------------------------------------
@@ -1228,6 +1258,7 @@ if [[ "$STAGE" == "FLAG" ]]; then
 	fi
 
 	copy_outputs
+	generate_image_previews
 	write_manifest "$STATUS" 0
 
 	if [[ "$WAIT_COPY" == true ]]; then
@@ -1283,6 +1314,7 @@ if [[ "$STAGE" == "2GC" ]]; then
 	fi
 
 	copy_outputs
+	generate_image_previews
 	write_manifest "$STATUS" 0
 
 	if [[ "$WAIT_COPY" == true ]]; then

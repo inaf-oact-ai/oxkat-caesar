@@ -14,9 +14,11 @@ From: oxkat-0.41.sif
 %files
     run_job.sh /opt/caesar/run_job.sh
     run_oxkat.sh /opt/caesar/run_oxkat.sh
-    oxkat_scientific_config.py /opt/caesar/oxkat_scientific_config.py
-    oxkat_target_info.py /opt/caesar/oxkat_target_info.py
-    oxkat_ms_identity.py /opt/caesar/oxkat_ms_identity.py
+    helpers/oxkat_scientific_config.py /opt/caesar/oxkat_scientific_config.py
+    helpers/oxkat_target_info.py /opt/caesar/oxkat_target_info.py
+    helpers/oxkat_ms_identity.py /opt/caesar/oxkat_ms_identity.py
+    helpers/oxkat_preview.py /opt/caesar/oxkat_preview.py
+
 
 %post
     set -eu
@@ -110,6 +112,8 @@ print("OXKAT MS identity checker OK")
 '
 
     /usr/bin/python3 -c 'import numpy, astropy'
+    
+    /usr/bin/python3 -m py_compile /opt/caesar/oxkat_preview.py
 
     PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
 import sys
