@@ -87,7 +87,7 @@ From: oxkat-0.41.sif
         --no-cache-dir \
         --prefer-binary \
         "numpy<2" \
-        "AegeanTools"
+        "AegeanTools==2.3.0"
 
     # Correct integer component counts in AegeanTools 2.3.0.
     /opt/aegean-venv/bin/python - <<'PY'
