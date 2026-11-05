@@ -645,19 +645,57 @@ generate_image_previews() {
 		return 0
 	fi
 
-	echo "INFO: Generating OXKAT $STAGE image previews..."
+	local preview_root="$OUT_DIR/previews"
+	local preview_all="$preview_root/all"
+	local retention_profile="${OXKAT_PREVIEW_RETENTION_PROFILE:-selected}"
+
+	case "$retention_profile" in
+		none|selected|all)
+			;;
+		*)
+			echo "WARNING: Invalid preview retention profile: $retention_profile" >&2
+			return 0
+			;;
+	esac
+
+	if [[ -e "$preview_root" ]]; then
+		echo 'WARNING: Preview output directory already exists.' >&2
+		return 0
+	fi
+
+	if ! mkdir -p "$preview_all"; then
+		echo 'WARNING: Cannot create preview output directories.' >&2
+		return 0
+	fi
+
+	echo "INFO: Generating all OXKAT $STAGE image previews..."
 
 	if ! /usr/bin/python3 /opt/caesar/oxkat_preview.py \
 		--images "$OUT_DIR/IMAGES" \
-		--outdir "$OUT_DIR" \
+		--outdir "$preview_all" \
 		--source-finding; then
-				
+
 		echo 'WARNING: Preview generation failed or was incomplete.' >&2
 		echo 'WARNING: Scientific output remains valid.' >&2
 	fi
 
+	if [[ -f "$preview_all/image_qa.json" ]]; then
+		echo "INFO: Organizing previews; retention profile: $retention_profile"
+
+		if ! /usr/bin/python3 /opt/caesar/oxkat_preview_layout.py \
+			--previews "$preview_root" \
+			--retention-profile "$retention_profile"; then
+
+			echo 'WARNING: Preview organization failed.' >&2
+			echo 'WARNING: Scientific output remains valid.' >&2
+		fi
+	else
+		echo 'WARNING: Preview QA file missing; skipping organization.' >&2
+	fi
+
 	return 0
 }
+
 
 # -----------------------------------------------------------------------------
 # Serialize a public, portable CAESAR-REST result manifest

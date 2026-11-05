@@ -18,7 +18,7 @@ From: oxkat-0.41.sif
     helpers/oxkat_target_info.py /opt/caesar/oxkat_target_info.py
     helpers/oxkat_ms_identity.py /opt/caesar/oxkat_ms_identity.py
     helpers/oxkat_preview.py /opt/caesar/oxkat_preview.py
-
+    helpers/oxkat_preview_layout.py /opt/caesar/oxkat_preview_layout.py
 
 %post
     set -eu
@@ -235,6 +235,17 @@ path = Path("/opt/caesar/oxkat_preview.py")
 ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 print("OXKAT preview generator syntax OK")
 PY
+
+
+    PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 - <<'PY'
+import ast
+from pathlib import Path
+
+path = Path("/opt/caesar/oxkat_preview_layout.py")
+ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+print("OXKAT preview layout helper syntax OK")
+PY
+
 
     PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
 import sys
