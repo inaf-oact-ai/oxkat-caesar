@@ -208,11 +208,18 @@ def _crop(data, x, y, size):
 	return data[y0:y0 + 2 * half, x0:x0 + 2 * half], [int(x0), int(y0), int(2 * half), int(2 * half)]
 
 
-def _generate_one(path, out):
+def _generate_one(path, out, *, identifier=None, product_kind=None):
+	
 	data, meta = _read_plane(path)
 	stats = _stats(data)
-	mask = _product_kind(path.name) in ('initial_cleaning_mask', 'refined_cleaning_mask')
-	identifier = _preview_identifier(path.name)
+	
+	if product_kind is None:
+		product_kind = _product_kind(path.name)
+	
+	mask = product_kind in ('initial_cleaning_mask', 'refined_cleaning_mask')
+	if identifier is None:
+		identifier = _preview_identifier(path.name)
+	
 	positions = [('overview', data, [0, 0, int(data.shape[1]), int(data.shape[0])])]
 	if min(data.shape) > 48:
 		center, bounds = _crop(data, data.shape[1] // 2, data.shape[0] // 2, MAX_CROP)
@@ -236,23 +243,22 @@ def _generate_one(path, out):
 		previews.append({'kind': kind, 'file': name, 'sample_bounds': bounds,
 			'pixels': [int(pixels.shape[1]), int(pixels.shape[0])], 'stretch': stretch})
 	return {'source_name': path.name, 'source_size_bytes': path.stat().st_size,
-		'product_id': identifier, 'product_kind': _product_kind(path.name), 'is_mask': mask, 'image': meta, 'statistics': stats,
+		'product_id': identifier, 'product_kind': product_kind, 'is_mask': mask, 'image': meta, 'statistics': stats,
 		'previews': previews}
 
 
 def _map_preview(path, out, identifier, label):
-	"""Render BANE-produced FITS map without publishing its large FITS copy."""
-	data, meta = _read_plane(path)
-	stats = _stats(data)
-	pixels, stretch = _render(data)
-	filename = 'preview_%s__%s.png' % (identifier, label)
-	_atomic_new(out / filename, _png_gray(pixels))
-	return {'file': filename, 'image': meta, 'statistics': stats, 'stretch': stretch}
-
+	"""Generate the standard five-view preview set for a BANE FITS map."""
+	return _generate_one(
+		path,
+		out,
+		identifier='%s__%s' % (identifier, label),
+		product_kind='bane_%s_map' % label
+	)
 
 def _catalog_summary(path, *, limit=10):
-	"""Summarize an Aegean FITS component table; no full catalog in JSON."""
-	components = Table.read(str(path), format='fits')
+	"""Summarize an Aegean tab-separated component catalog."""
+	components = Table.read(str(path), format='ascii.tab')
 	count = len(components)
 	cols = set(components.colnames)
 	def finite_column(name):
@@ -373,84 +379,196 @@ def _run_scientific_tool(args, *, cwd, log_path, timeout, label):
 	_progress('%s completed successfully (%.1f s)' % (label, elapsed))
 	return elapsed
 
+def _retain_catalog(source, output, filename):
+	"""Retain an Aegean catalog without overwriting existing products."""
+	source = Path(source)
+	destination = output / filename
 
-def _source_finding(path, output, identifier, *, scratch_dir=None, timeout=SOURCE_FINDING_TIMEOUT):
-	"""Run BANE and Aegean with durable per-tool logs and progress updates."""
+	if not source.is_file():
+		raise RuntimeError(
+			'Expected Aegean catalog not generated: %s' % source.name
+		)
+
+	with source.open('rb') as reader:
+		with destination.open('xb') as writer:
+			try:
+				shutil.copyfileobj(reader, writer, length=1024 * 1024)
+			except BaseException:
+				writer.close()
+				destination.unlink()
+				raise
+
+	return filename
 	
+def _source_finding(path, output, identifier, *, scratch_dir=None, timeout=SOURCE_FINDING_TIMEOUT):
+	"""Run BANE/Aegean, publish previews and retain ASCII/DS9 catalogs."""
+
 	for executable in ('BANE', 'aegean'):
 		if shutil.which(executable) is None:
 			raise RuntimeError('%s executable not installed in scientific image' % executable)
-	
+
 	with tempfile.TemporaryDirectory(prefix='oxkat-sourcefind-', dir=scratch_dir) as work:
 		workpath = Path(work)
+
 		prefix = workpath / 'bane'
 		background = workpath / 'bane_bkg.fits'
 		rms = workpath / 'bane_rms.fits'
-		catalog = workpath / 'aegean_components.fits'
+
+		catalog_base = workpath / 'aegean_catalog'
+		catalog_native = workpath / 'aegean_catalog.dat'
+		catalog_tab = workpath / 'aegean_catalog.tab'
+		catalog_reg = workpath / 'aegean_catalog.reg'
+
 		log_bane = output / ('sourcefind_%s__BANE.log' % identifier)
 		log_aegean = output / ('sourcefind_%s__aegean.log' % identifier)
-		
+
 		_progress('Source finding selected %s' % path.name)
-		
+
 		bane_seconds = _run_scientific_tool(
 			[
-				'BANE', str(path), 
-				'--out', str(prefix), 
+				'BANE', str(path),
+				'--out', str(prefix),
 				'--cores', '1'
 			],
-			cwd=workpath, 
-			log_path=log_bane, 
-			timeout=timeout, 
+			cwd=workpath,
+			log_path=log_bane,
+			timeout=timeout,
 			label='BANE'
 		)
-		
+
 		if not background.is_file() or not rms.is_file():
-			raise RuntimeError('BANE finished without expected background/RMS FITS maps; see %s' % log_bane.name)
-			
-		_progress('BANE maps ready; rendering background and RMS PNGs')
-		
+			raise RuntimeError(
+				'BANE finished without expected background/RMS FITS maps; see %s'
+				% log_bane.name
+			)
+
+		_progress('BANE maps ready; generating standard map previews')
+
 		result = {
-			'status': 'complete', 
+			'status': 'complete',
 			'algorithm': 'BANE+AEGEAN',
 			'logs': {
-				'bane': log_bane.name, 
+				'bane': log_bane.name,
 				'aegean': log_aegean.name
 			},
 			'duration_seconds': {
 				'bane': round(bane_seconds, 2)
-			},
-			'background': _map_preview(background, output, identifier, 'background'),
-			'rms': _map_preview(rms, output, identifier, 'rms')
+			}
 		}
-		
-		_progress('BANE maps rendered; starting Aegean detection')
+
+		result['background'] = _map_preview(
+			background, output, identifier, 'background'
+		)
+
+		result['rms'] = _map_preview(
+			rms, output, identifier, 'rms'
+		)
+
+		_progress('BANE previews completed; starting Aegean detection')
 
 		aegean_seconds = _run_scientific_tool(
 			[
 				'aegean', str(path),
-				'--background', str(background),
-				'--noise', str(rms),
-				'--table', str(catalog),
+				'--find',
 				'--cores', '1',
 				'--slice', '0',
+				'--noise', str(rms),
+				'--background', str(background),
+				'--maxsummits', '5',
 				'--seedclip', '5',
-				'--floodclip', '4'
+				'--floodclip', '4',
+				'--island',
+				'--out', str(catalog_native),
+				'--table', '%s,%s' % (catalog_reg, catalog_tab)
 			],
 			cwd=workpath,
 			log_path=log_aegean,
 			timeout=timeout,
 			label='Aegean'
 		)
-		
-		if not catalog.is_file():
-			raise RuntimeError('Aegean finished without FITS component catalog; see %s' % log_aegean.name)
 
 		result['duration_seconds']['aegean'] = round(aegean_seconds, 2)
-		result['sources'] = _catalog_summary(catalog)
-		result['brightest_source_preview'] = _brightest_source_preview(path, result['sources'], output, identifier)
 
-		_progress('Aegean catalog summarized: %d components, %s islands' % (result['sources']['component_count'], result['sources']['island_count']))
-		
+		component_tab = Path('%s_comp.tab' % catalog_base)
+		island_tab = Path('%s_isle.tab' % catalog_base)
+		component_reg = Path('%s_comp.reg' % catalog_base)
+		island_reg = Path('%s_isle.reg' % catalog_base)
+
+		# Aegean writes _comp and _isle outputs only when
+		# corresponding catalog entries are available.
+		catalog_files = {
+			'native_ascii': catalog_native,
+			'components_ascii': component_tab,
+			'islands_ascii': island_tab,
+			'components_ds9': component_reg,
+			'islands_ds9': island_reg
+		}
+
+		# The native ASCII listing is produced by --out even when
+		# there are no fitted sources.
+		if not catalog_native.is_file():
+			raise RuntimeError(
+				'Aegean finished without native ASCII catalog; see %s'
+				% log_aegean.name
+			)
+
+		# Source counts and statistics are derived before scratch cleanup.
+		if component_tab.is_file():
+			sources = _catalog_summary(component_tab)
+		else:
+			sources = {
+				'component_count': 0,
+				'island_count': 0,
+				'peak_flux': {'count': 0},
+				'integrated_flux': {'count': 0}
+			}
+
+		if island_tab.is_file():
+			islands = Table.read(str(island_tab), format='ascii.tab')
+			sources['island_count'] = int(len(islands))
+
+			for key in ('island_flux', 'island_rms'):
+				if key in islands.colnames:
+					values = np.ma.filled(
+						np.ma.asarray(islands[key], dtype=np.float64),
+						np.nan
+					)
+					values = values[np.isfinite(values)]
+					sources[key] = _distribution(values)
+
+		result['sources'] = sources
+
+		# Retain every catalog generated by Aegean.
+		retained = {}
+
+		for kind, source in catalog_files.items():
+			if not source.is_file():
+				retained[kind] = None
+				continue
+
+			extension = source.suffix
+			filename = 'sourcefind_%s__%s%s' % (
+				identifier, kind, extension
+			)
+
+			retained[kind] = _retain_catalog(
+				source, output, filename
+			)
+
+		result['catalogs'] = retained
+
+		result['brightest_source_preview'] = _brightest_source_preview(
+			path, sources, output, identifier
+		)
+
+		_progress(
+			'Aegean catalog summarized: %d components, %s islands'
+			% (
+				sources['component_count'],
+				sources['island_count']
+			)
+		)
+
 		return result
 
 
