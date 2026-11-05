@@ -81,3 +81,25 @@ def test_nonfinite_image_records_failure(tmp_path):
 	assert result['products'] == []
 	assert len(result['errors']) == 1
 	assert (out / 'image_qa.json').exists()
+
+
+def test_filename_provenance_and_priority(tmp_path):
+	images = tmp_path / 'IMAGES'
+	images.mkdir()
+	out = tmp_path / 'results'
+	out.mkdir()
+	name = 'img_measurement_set_1024ch_MAXIJ1348.ms_datablind-MFS-image.fits'
+	make_image(images, name, np.ones((64, 64), dtype=np.float32))
+	make_image(images, 'img_measurement_set_1024ch_MAXIJ1348.ms_datablind-MFS-residual.fits',
+		np.ones((64, 64), dtype=np.float32))
+	for index in range(8):
+		make_image(images, 'img_measurement_set_1024ch_MAXIJ1348.ms_datablind-%04d-image.fits' % index,
+			np.ones((64, 64), dtype=np.float32))
+	result = generate(images, out, max_files=2)
+	assert [item['product_kind'] for item in result['products']] == [
+		'mfs_restored_image', 'mfs_residual'
+	]
+	first = result['products'][0]
+	assert first['source_name'] == name
+	assert first['previews'][0]['file'] == 'preview_%s__overview.png' % name[:-5]
+	assert (out / first['previews'][0]['file']).is_file()

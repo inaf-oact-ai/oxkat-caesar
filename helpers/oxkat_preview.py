@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import struct
 import sys
@@ -52,6 +53,57 @@ def _atomic_new(path, data):
 			os.unlink(temp)
 
 
+def _product_kind(name):
+	"""Classify WSClean/OXKAT products using their documented suffixes."""
+	n = name.lower()
+	if n.endswith('.mask0.fits'):
+		return 'initial_cleaning_mask'
+	if n.endswith('.mask1.fits'):
+		return 'refined_cleaning_mask'
+	if n.endswith('-mfs-image.pbcor.fits'):
+		return 'mfs_primary_beam_corrected_image'
+	if n.endswith('-mfs-image.pb.fits'):
+		return 'mfs_primary_beam_response'
+	if n.endswith('-mfs-image.wt.fits'):
+		return 'mfs_weight_map'
+	for suffix, kind in (
+		('-mfs-image.fits', 'mfs_restored_image'),
+		('-mfs-residual.fits', 'mfs_residual'),
+		('-mfs-dirty.fits', 'mfs_dirty_image'),
+		('-mfs-model.fits', 'mfs_model'),
+		('-mfs-psf.fits', 'mfs_point_spread_function'),
+	):
+		if n.endswith(suffix):
+			return kind
+	return 'spectral_plane_or_other'
+
+
+_PRIORITY = {
+	'mfs_primary_beam_corrected_image': 0,
+	'mfs_restored_image': 1,
+	'mfs_residual': 2,
+	'initial_cleaning_mask': 3,
+	'refined_cleaning_mask': 3,
+	'mfs_dirty_image': 4,
+	'mfs_model': 5,
+	'mfs_point_spread_function': 6,
+	'mfs_primary_beam_response': 7,
+	'mfs_weight_map': 8,
+	'spectral_plane_or_other': 9,
+}
+
+
+def _preview_identifier(source_name):
+	"""Prefer the intact FITS stem; hash only on pathological long names."""
+	stem = Path(source_name).stem
+	if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', stem):
+		raise ValueError('Unsupported FITS basename: %s' % source_name)
+	# Keep generated names below typical 255-byte filesystem limits.
+	if len(stem.encode('utf-8')) > 175:
+		stem = stem[:150] + '__' + hashlib.sha256(source_name.encode('utf-8')).hexdigest()[:16]
+	return stem
+
+
 def _source_files(images, limit):
 	if images.is_symlink() or not images.is_dir():
 		raise ValueError('IMAGES must be an ordinary directory')
@@ -62,10 +114,7 @@ def _source_files(images, limit):
 		if child.is_symlink() or not child.is_file():
 			raise ValueError('Unsafe FITS entry in IMAGES: %s' % child.name)
 		files.append(child)
-	def order(p):
-		n = p.name.lower()
-		return (0 if 'mfs-image' in n else 1 if '.mask' in n else 2, n)
-	return sorted(files, key=order)[:limit]
+	return sorted(files, key=lambda p: (_PRIORITY[_product_kind(p.name)], p.name.lower()))[:limit]
 
 
 def _read_plane(src):
@@ -147,8 +196,8 @@ def _crop(data, x, y, size):
 def _generate_one(path, out):
 	data, meta = _read_plane(path)
 	stats = _stats(data)
-	mask = '.mask' in path.name.lower()
-	identifier = hashlib.sha256(path.name.encode('utf-8')).hexdigest()[:16]
+	mask = _product_kind(path.name) in ('initial_cleaning_mask', 'refined_cleaning_mask')
+	identifier = _preview_identifier(path.name)
 	positions = [('overview', data, [0, 0, int(data.shape[1]), int(data.shape[0])])]
 	if min(data.shape) > 48:
 		center, bounds = _crop(data, data.shape[1] // 2, data.shape[0] // 2, MAX_CROP)
@@ -160,12 +209,12 @@ def _generate_one(path, out):
 	previews = []
 	for kind, view, bounds in positions:
 		pixels, stretch = _render(view, mask=mask)
-		name = 'preview_%s_%s.png' % (identifier, kind)
+		name = 'preview_%s__%s.png' % (identifier, kind)
 		_atomic_new(out / name, _png_gray(pixels))
 		previews.append({'kind': kind, 'file': name, 'sample_bounds': bounds,
 			'pixels': [int(pixels.shape[1]), int(pixels.shape[0])], 'stretch': stretch})
 	return {'source_name': path.name, 'source_size_bytes': path.stat().st_size,
-		'product_id': identifier, 'is_mask': mask, 'image': meta, 'statistics': stats,
+		'product_id': identifier, 'product_kind': _product_kind(path.name), 'is_mask': mask, 'image': meta, 'statistics': stats,
 		'previews': previews}
 
 
