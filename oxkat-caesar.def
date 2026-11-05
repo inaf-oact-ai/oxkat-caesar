@@ -111,8 +111,8 @@ for old, new in replacements.items():
     count = source.count(old)
     if count != expected_counts[old]:
         raise RuntimeError(
-            "Unexpected AegeanTools source: %s found %d times, expected %d"
-            % (old, count, expected_counts[old])
+            f"Unexpected AegeanTools source: {old} found {count} times, "
+            f"expected {expected_counts[old]}"
         )
     source = source.replace(old, new)
 
