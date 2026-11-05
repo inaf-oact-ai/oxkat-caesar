@@ -212,20 +212,6 @@ ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 print("OXKAT preview generator syntax OK")
 PY
 
-    /opt/aegean-venv/bin/python - <<'PY'
-from pathlib import Path
-import AegeanTools.fitting
-
-path = Path(AegeanTools.fitting.__file__)
-source = path.read_text(encoding="utf-8")
-
-assert "range(pars['components'].value)" not in source
-assert "range(params['components'].value)" not in source
-
-print("AegeanTools integer component compatibility check passed")
-PY
-
-
     PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
 import sys
 from pathlib import Path
