@@ -86,7 +86,65 @@ From: oxkat-0.41.sif
     /opt/aegean-venv/bin/python -m pip install \
         --no-cache-dir \
         --prefer-binary \
+        "numpy<2" \
         "AegeanTools"
+
+    # Correct integer component counts in AegeanTools 2.3.0.
+    /opt/aegean-venv/bin/python - <<'PY'
+from pathlib import Path
+import AegeanTools.fitting
+import AegeanTools.source_finder
+
+patches = {
+    Path(AegeanTools.fitting.__file__): {
+        "range(pars['components'].value)": 4,
+        "range(params['components'].value)": 2,
+    },
+    Path(AegeanTools.source_finder.__file__): {
+        'range(model["components"].value)': 1,
+        'range(params["components"].value)': 2,
+        'range(mask_params["components"].value)': 1,
+    },
+}
+
+for path, replacements in patches.items():
+    source = path.read_text(encoding="utf-8")
+
+    for old, expected in replacements.items():
+        count = source.count(old)
+        if count != expected:
+            raise RuntimeError(
+                f"Unexpected AegeanTools source in {path.name}: "
+                f"{old} found {count} times, expected {expected}"
+            )
+
+        new = old.replace("range(", "range(int(", 1)
+        new = new[:-1] + "))"
+        source = source.replace(old, new)
+
+    if path.name == "source_finder.py":
+        flag_replacements = {
+            'src_flags |= model[prefix + "flags"].value':
+                'src_flags |= int(model[prefix + "flags"].value)',
+            'params[prefix + "flags"].value |= flags.NOTFIT':
+                'params[prefix + "flags"].value = int(params[prefix + "flags"].value) | flags.NOTFIT',
+        }
+
+        for old, new in flag_replacements.items():
+            count = source.count(old)
+            if count != 1:
+                raise RuntimeError(
+                    f"Unexpected source_finder.py flag expression: "
+                    f"{old} found {count} times, expected 1"
+                )
+            source = source.replace(old, new)
+
+    compile(source, str(path), "exec")
+    path.write_text(source, encoding="utf-8")
+    print(f"AegeanTools compatibility fix applied: {path.name}")
+
+print("AegeanTools integer component compatibility fixes complete")
+PY
 
     # Verify the environment.
     /opt/aegean-venv/bin/python -m pip check
