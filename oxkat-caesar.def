@@ -93,33 +93,40 @@ From: oxkat-0.41.sif
     /opt/aegean-venv/bin/python - <<'PY'
 from pathlib import Path
 import AegeanTools.fitting
+import AegeanTools.source_finder
 
-path = Path(AegeanTools.fitting.__file__)
-source = path.read_text(encoding="utf-8")
-
-replacements = {
-    "range(pars['components'].value)": "range(int(pars['components'].value))",
-    "range(params['components'].value)": "range(int(params['components'].value))",
+patches = {
+    Path(AegeanTools.fitting.__file__): {
+        "range(pars['components'].value)": 4,
+        "range(params['components'].value)": 2,
+    },
+    Path(AegeanTools.source_finder.__file__): {
+        'range(model["components"].value)': 1,
+        'range(params["components"].value)': 2,
+        'range(mask_params["components"].value)': 1,
+    },
 }
 
-expected_counts = {
-    "range(pars['components'].value)": 4,
-    "range(params['components'].value)": 2,
-}
+for path, replacements in patches.items():
+    source = path.read_text(encoding="utf-8")
 
-for old, new in replacements.items():
-    count = source.count(old)
-    if count != expected_counts[old]:
-        raise RuntimeError(
-            f"Unexpected AegeanTools source: {old} found {count} times, "
-            f"expected {expected_counts[old]}"
-        )
-    source = source.replace(old, new)
+    for old, expected in replacements.items():
+        count = source.count(old)
+        if count != expected:
+            raise RuntimeError(
+                f"Unexpected AegeanTools source in {path.name}: "
+                f"{old} found {count} times, expected {expected}"
+            )
 
-compile(source, str(path), "exec")
-path.write_text(source, encoding="utf-8")
+        new = old.replace("range(", "range(int(", 1)
+        new = new[:-1] + "))"
+        source = source.replace(old, new)
 
-print("AegeanTools 2.3.0 integer component compatibility fix applied")
+    compile(source, str(path), "exec")
+    path.write_text(source, encoding="utf-8")
+    print(f"AegeanTools compatibility fix applied: {path.name}")
+
+print("AegeanTools integer component compatibility fixes complete")
 PY
 
     # Verify the environment.
