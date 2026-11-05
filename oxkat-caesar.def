@@ -72,6 +72,7 @@ From: oxkat-0.41.sif
     export OXKAT_HOME=/opt/oxkat
     export OXKAT_RUNNER_PATH=/opt/caesar/run_oxkat.sh
     export PATH=/opt/caesar:$PATH
+    export PYTHONDONTWRITEBYTECODE=1
 
 %runscript
     # Forward CAESAR-REST's existing CLI contract without evaluating arguments.
