@@ -89,6 +89,39 @@ From: oxkat-0.41.sif
         "numpy<2" \
         "AegeanTools==2.3.0"
 
+    # Correct integer component counts in AegeanTools 2.3.0.
+    /opt/aegean-venv/bin/python - <<'PY'
+from pathlib import Path
+import AegeanTools.fitting
+
+path = Path(AegeanTools.fitting.__file__)
+source = path.read_text(encoding="utf-8")
+
+replacements = {
+    "range(pars['components'].value)": "range(int(pars['components'].value))",
+    "range(params['components'].value)": "range(int(params['components'].value))",
+}
+
+expected_counts = {
+    "range(pars['components'].value)": 4,
+    "range(params['components'].value)": 2,
+}
+
+for old, new in replacements.items():
+    count = source.count(old)
+    if count != expected_counts[old]:
+        raise RuntimeError(
+            "Unexpected AegeanTools source: %s found %d times, expected %d"
+            % (old, count, expected_counts[old])
+        )
+    source = source.replace(old, new)
+
+compile(source, str(path), "exec")
+path.write_text(source, encoding="utf-8")
+
+print("AegeanTools 2.3.0 integer component compatibility fix applied")
+PY
+
     # Verify the environment.
     /opt/aegean-venv/bin/python -m pip check
 
@@ -178,6 +211,20 @@ path = Path("/opt/caesar/oxkat_preview.py")
 ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
 print("OXKAT preview generator syntax OK")
 PY
+
+    /opt/aegean-venv/bin/python - <<'PY'
+from pathlib import Path
+import AegeanTools.fitting
+
+path = Path(AegeanTools.fitting.__file__)
+source = path.read_text(encoding="utf-8")
+
+assert "range(pars['components'].value)" not in source
+assert "range(params['components'].value)" not in source
+
+print("AegeanTools integer component compatibility check passed")
+PY
+
 
     PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -c '
 import sys
